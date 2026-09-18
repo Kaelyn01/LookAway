@@ -1,0 +1,16 @@
+LookAway
+Copyright 2026 Chen Tian (Fudan University)
+
+This product includes software developed by Chen Tian (Fudan University)
+as part of the LookAway project.
+
+This product contains vendored third-party code:
+
+- verl — Volcano Engine Reinforcement Learning for LLMs
+  (https://github.com/volcengine/verl), Apache License 2.0.
+- Vision-OPD — Learning to See Fine-Grained Details for Multimodal LLMs
+  via On-Policy Self-Distillation (https://github.com/VisionOPD/Vision-OPD,
+  arXiv:2605.18740), Apache License 2.0.
+
+The training data is derived from the Vision-OPD-6K dataset
+(https://huggingface.co/datasets/yuanqianhao/Vision-OPD-6K).

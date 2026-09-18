@@ -1,0 +1,39 @@
+# caches and generated data (see scripts/prepare_*.py)
+cache/
+data/
+dumps/
+results.json
+token_priors.json
+token_scores_full.jsonl
+
+# training artifacts
+checkpoints/
+rollouts/
+logs/
+tensorboard_log/
+wandb/
+outputs/
+*.safetensors
+*.parquet
+
+# eval artifacts (benchmark images / jsons are downloaded by eval/prepare_data.py)
+eval/*_images/
+eval/*_data/
+eval/*.json
+eval/model_answer/
+eval/judge/
+
+# python
+__pycache__/
+*.pyc
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+
+# editors / os
+.idea/
+.vscode/
+.DS_Store
+*.bak*
