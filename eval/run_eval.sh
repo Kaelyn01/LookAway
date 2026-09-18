@@ -118,6 +118,7 @@ run_single_benchmark() {
   python3 judge_qwenlm.py \
     --benchmark "${judge_benchmark}" \
     --model "${judge_model_tag}" \
+    --answer_dir "${OUT_DIR}" \
     "${JUDGE_ARGS[@]}"
 
   # [4/4] Accuracy

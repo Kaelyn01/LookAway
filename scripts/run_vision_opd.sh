@@ -19,7 +19,7 @@ TEACHER_REGULARIZATION="ema"
 TEACHER_UPDATE_RATE=0.05
 
 TRAIN_BATCH_SIZE=96
-PPO_MIMI_BATCH_SIZE=96
+PPO_MINI_BATCH_SIZE=96
 ROLLOUT_N=8
 ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE=1
 LR=2e-6
@@ -53,7 +53,7 @@ TASK_TRAIN_FILE="${DATA_DIR}/train.parquet"
 
 MODEL_NAME=$(basename "$MODEL_PATH")
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-Vision-OPD-${MODEL_NAME}}"
-PROJECT_NAME="Vision-OPD"
+PROJECT_NAME="${PROJECT_NAME:-Vision-OPD}"
 WORK_DIR="${WORK_DIR:-${PROJECT_ROOT}}"
 TRAINER_DEFAULT_LOCAL_DIR="${WORK_DIR}/checkpoints/${EXPERIMENT_NAME}"
 TRAINER_ROLLOUT_DATA_DIR="${WORK_DIR}/rollouts/${EXPERIMENT_NAME}"
@@ -104,7 +104,7 @@ python3 -m verl.trainer.main_ppo --config-name "$CONFIG_NAME" \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.rollout.n=$ROLLOUT_N \
     actor_rollout_ref.actor.optim.lr=$LR \
-    actor_rollout_ref.actor.ppo_mini_batch_size=$PPO_MIMI_BATCH_SIZE \
+    actor_rollout_ref.actor.ppo_mini_batch_size=$PPO_MINI_BATCH_SIZE \
     actor_rollout_ref.actor.use_dynamic_bsz=$ACTOR_USE_DYNAMIC_BSZ \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$PPO_MAX_TOKEN_LEN_PER_GPU \
     actor_rollout_ref.actor.fsdp_config.param_offload=$ACTOR_PARAM_OFFLOAD \

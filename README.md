@@ -59,7 +59,7 @@ ${PYTHON} scripts/prepare_priors.py \
   --model-path Qwen/Qwen3.5-4B
 ```
 
-This greedily answers every training question from the student view, re-scores the answers under all three views, and derives the token priors (word selection rate + template bigrams) into `./cache/lookaway/token_priors.json`.
+This greedily answers every training question from the student view, re-scores the answers under all three views using the same chat template as training, and derives the token priors (word selection rate + template bigrams) into `./cache/lookaway/token_priors.json`.
 
 ## Train
 
@@ -94,8 +94,10 @@ recipe is `scripts/run_vision_opd.sh` without overrides.
 
 | Flag | `run_lookaway.sh` value | Meaning |
 | --- | --- | --- |
+| `self_distillation.vd_dual_signal` | `True` | Use dynamic batch quantiles for the view-dependence and student-gap signals |
 | `self_distillation.vd_base_signal` | `dd` | Base-weight signal: `dd` (view-dependence only) or `dual` (× teacher-student gap) |
 | `self_distillation.vd_gamma` | `1.0` | Base-weight strength |
+| `self_distillation.vd_tau` | `2.0` | Fixed-knee scale used when `vd_dual_signal=False` |
 | `self_distillation.vd_targeted` | `True` | Enable the targeted extrapolation leg |
 | `self_distillation.vd_lambda` | `4.0` | Extrapolation strength on gate-passing tokens |
 | `self_distillation.vd_rate_cut` | `0.12` | Word-rate prior gate cut |
@@ -144,13 +146,7 @@ BENCHMARK=vstar,zoombench \
 bash eval/run_eval.sh
 ```
 
-Supported benchmarks: `vstar`, `zoombench`, `hrbench-4k`, `hrbench-8k`, `mme-realworld`, `mme-realworld-cn`, `mme-realworld-lite`, `visualprobe`, `mmvp`, `cv-bench`, `mmstar`, `pope`. For the Qwen3.5 baseline set `ENABLE_THINKING=False`.
-
-> The evaluation harness is vendored as-is from Vision-OPD (it produced all
-> reported numbers). Known quirks inherited from upstream: thinking-mode
-> outputs are not stripped before grading (always evaluate non-thinking
-> models), and multiple-choice replies of the literal form "Answer: X" can
-> confuse the option extractor.
+Supported benchmarks: `vstar`, `zoombench`, `hrbench-4k`, `hrbench-8k`, `mme-realworld`, `mme-realworld-cn`, `mme-realworld-lite`, `visualprobe`, `mmvp`, `cv-bench`, `mmstar`, `pope`, `pope_adv`, `pope_pop`, and `pope_random`. For the Qwen3.5 baseline set `ENABLE_THINKING=False`. Thinking traces and common `Answer: X` wrappers are stripped before grading.
 
 ## Citation
 

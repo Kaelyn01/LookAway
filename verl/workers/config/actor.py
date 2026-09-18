@@ -121,7 +121,6 @@ class SelfDistillationConfig(BaseConfig):
     vd_targeted: bool = False
     vd_lambda: float = 4.0
     vd_rate_cut: float = 0.12
-    vd_tmpl_cut: float = 0.25
     vd_prior_file: Optional[str] = None
     vd_jsd_gate: bool = False
     vd_jsd_q: float = 0.5
@@ -157,6 +156,12 @@ class SelfDistillationConfig(BaseConfig):
             raise ValueError(f"self_distillation.vd_gamma must be non-negative, got {self.vd_gamma}")
         if self.vd_tau <= 0:
             raise ValueError(f"self_distillation.vd_tau must be positive, got {self.vd_tau}")
+        if self.vd_lambda < 0:
+            raise ValueError(f"self_distillation.vd_lambda must be non-negative, got {self.vd_lambda}")
+        if not 0.0 <= self.vd_rate_cut <= 1.0:
+            raise ValueError(f"self_distillation.vd_rate_cut must be in [0, 1], got {self.vd_rate_cut}")
+        if self.vd_targeted and self.vd_gamma == 0:
+            raise ValueError("vd_targeted requires vd_gamma > 0.")
         if self.vd_targeted and not self.vd_dual_signal:
             raise ValueError("vd_targeted requires vd_dual_signal (extrapolation builds on the dual-signal base weight).")
         if self.vd_targeted and not self.vd_prior_file:
@@ -172,6 +177,8 @@ class SelfDistillationConfig(BaseConfig):
                 "vd_gamma > 0 requires teacher_always_on=True: the negative-view "
                 "teacher tensors are only built on the always-on teacher path."
             )
+        if self.vd_gamma > 0 and not self.teacher_neg_image_key:
+            raise ValueError("vd_gamma > 0 requires self_distillation.teacher_neg_image_key.")
         if self.teacher_prompt_mode is not None and self.teacher_prompt_mode != "answer_hint":
             raise ValueError(
                 f"self_distillation.teacher_prompt_mode must be None or 'answer_hint', got {self.teacher_prompt_mode}"

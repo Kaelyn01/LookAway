@@ -24,6 +24,8 @@ MODEL_NAME="$(basename "$MODEL_PATH")"
 TRAIN_FILE="$DATA_DIR/train.parquet"
 PRIOR_FILE="$DATA_DIR/token_priors.json"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-LookAway-${MODEL_NAME}}"
+PROJECT_NAME="${PROJECT_NAME:-LookAway}"
+export EXPERIMENT_NAME PROJECT_NAME
 
 for f in "$TRAIN_FILE" "$PRIOR_FILE"; do
   if [ ! -f "$f" ]; then

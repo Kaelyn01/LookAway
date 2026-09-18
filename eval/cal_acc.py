@@ -138,8 +138,7 @@ def _pope_metrics(items):
     precision = tp / (tp + fp) if (tp + fp) else 0.0
     recall = tp / (tp + fn) if (tp + fn) else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
-    yes_count = sum(1 for x in items if str(x.get("response", "")).strip().lower() == "yes")
-    yes_ratio = yes_count / total if total else 0.0
+    yes_ratio = (tp + fp) / total if total else 0.0
     return accuracy, precision, recall, f1, yes_ratio, total
 
 
@@ -203,14 +202,19 @@ def calc_generic(judge_json, benchmark):
         data = json.load(f)
     n = len(data)
     c = sum(1 for x in data if is_correct(x))
-    print(f"{benchmark} Acc: {c}/{n} = {100 * c / n:.2f}%")
+    print(f"{benchmark} Acc: {acc_text(c, n)}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Calculate accuracy from judge results")
     parser.add_argument("--benchmark", required=True, type=str)
     parser.add_argument("--judge_json", required=True, type=str, help="Path to judge output JSON")
-    parser.add_argument("--benchmark_json", default=None, type=str, help="Path to original benchmark JSON (for category breakdown)")
+    parser.add_argument(
+        "--benchmark_json",
+        default=None,
+        type=str,
+        help="Path to original benchmark JSON (for category breakdown)",
+    )
     args = parser.parse_args()
 
     if args.benchmark == "visualprobe":

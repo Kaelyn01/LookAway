@@ -1185,7 +1185,7 @@ def compute_self_distillation_loss(
     if rollout_is_weights is not None:
         weighted_per_token_loss = weighted_per_token_loss * rollout_is_weights
 
-    # votedistill: per-token voting weights (mean-normalized upstream so the existing
+    # LookAway per-token voting weights (mean-normalized upstream so the existing
     # token-mean aggregation keeps the baseline loss scale; gamma=0 never sets them).
     if vd_weights is not None:
         weighted_per_token_loss = weighted_per_token_loss * vd_weights

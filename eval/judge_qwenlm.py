@@ -48,12 +48,13 @@ def extract_first_option(text):
     match = re.search(r"\(([A-Z])\)", text)
     if match:
         return match.group(1)
-    match = re.search(r"([A-Z])[\.\)\s]", text)
+    match = re.search(
+        r"(?:^|\b(?:answer|option|choice)\s*(?:is\s+)?[:\-]?\s*)([A-F])(?:$|[.\)\]\s])",
+        text,
+        re.IGNORECASE,
+    )
     if match:
-        return match.group(1)
-    match = re.search(r"([A-Z])", text)
-    if match:
-        return match.group(1)
+        return match.group(1).upper()
     return ""
 
 
@@ -106,14 +107,18 @@ def first_letter_match(gt, answer):
 
 
 def extract_answer(model_answer_raw):
-    if "<answer>" in model_answer_raw:
-        start = model_answer_raw.find("<answer>")
-        end = model_answer_raw.find("</answer>")
-        if start != -1 and end != -1:
-            return model_answer_raw[start + len("<answer>") : end].strip()
-    if "Answer:" in model_answer_raw:
-        return model_answer_raw[model_answer_raw.find("Answer:") :].strip()
-    return model_answer_raw.strip()
+    text = model_answer_raw.strip()
+    think_end = text.rfind("</think>")
+    if think_end != -1:
+        text = text[think_end + len("</think>") :].strip()
+    start = text.rfind("<answer>")
+    end = text.find("</answer>", start + len("<answer>")) if start != -1 else -1
+    if start != -1 and end != -1 and end > start:
+        return text[start + len("<answer>") : end].strip()
+    answer_match = re.search(r"(?i)answer\s*:\s*(.*)", text, flags=re.DOTALL)
+    if answer_match:
+        return answer_match.group(1).strip()
+    return text
 
 
 def judge_via_api(prompts, api_base, api_key, judge_model, judge_max_tokens, parallel_workers=32):
@@ -188,6 +193,7 @@ def main():
     parser.add_argument("--api_key", default="EMPTY", type=str)
     parser.add_argument("--judge_model", default=None, type=str, help="Model name for API-based judging")
     parser.add_argument("--judge_max_tokens", default=2048, type=int)
+    parser.add_argument("--answer_dir", default="model_answer", type=str)
     args = parser.parse_args()
 
     if not args.api_base and not args.judge_model_path:
@@ -198,7 +204,7 @@ def main():
         )
         sys.exit(1)
 
-    answer_path = f"model_answer/{args.benchmark}/{args.model}_answer.jsonl"
+    answer_path = os.path.join(args.answer_dir, args.benchmark, f"{args.model}_answer.jsonl")
     save_path = f"judge/{args.benchmark}/{args.model}_answer.jsonl"
     os.makedirs(f"judge/{args.benchmark}", exist_ok=True)
     is_mcq = args.benchmark in MCQ_BENCHMARKS

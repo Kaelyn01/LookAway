@@ -42,6 +42,7 @@ from verl.utils.torch_dtypes import PrecisionType
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outputs_and_unpad, slice_input_tensor, ulysses_pad, ulysses_pad_and_slice_inputs
 from verl.workers.actor import BasePPOActor
+from verl.workers.actor.lookaway_utils import normalize_vd_weights, token_distillation_divergence
 from verl.workers.config import ActorConfig
 
 __all__ = ["DataParallelPPOActor"]
@@ -842,7 +843,7 @@ class DataParallelPPOActor(BasePPOActor):
         return outputs
 
     def _vd_priors(self, self_distillation_cfg):
-        """VoteDistill v3 frozen priors, loaded once: (rate_by_token_id, template_bigram_pairs)."""
+        """Load and cache LookAway's token-rate and template-bigram priors."""
         cached = getattr(self, "_vd_priors_cache", None)
         if cached is not None:
             return cached
@@ -851,7 +852,8 @@ class DataParallelPPOActor(BasePPOActor):
         prior_file = self_distillation_cfg.get("vd_prior_file", None)
         if not prior_file:
             raise ValueError("vd_targeted requires self_distillation.vd_prior_file.")
-        blob = json.load(open(prior_file))
+        with open(prior_file, encoding="utf-8") as f:
+            blob = json.load(f)
         rate_by_id = {int(k): float(v) for k, v in blob["rate"].items()}
         tmpl_pairs = {(int(p), int(c)) for p, c in blob["tmpl"]}
         self._vd_priors_cache = (rate_by_id, tmpl_pairs)
@@ -901,7 +903,7 @@ class DataParallelPPOActor(BasePPOActor):
         # Weights are computed centrally in trainer and added to batch when algorithm.rollout_is=True
         if "rollout_is_weights" in data.batch.keys():
             select_keys.append("rollout_is_weights")
-        # VoteDistill: negative teacher inputs (present only when vd_gamma > 0)
+        # LookAway negative-teacher inputs (present only when vd_gamma > 0).
         vd_neg_keys = {
             "teacher_neg_input_ids",
             "teacher_neg_attention_mask",
@@ -1069,7 +1071,7 @@ class DataParallelPPOActor(BasePPOActor):
                         teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
                         teacher_topk_logps = teacher_outputs.get("topk_logps") if distill_topk else None
 
-                        # VoteDistill: run the negative-view teacher forward on the SAME EMA
+                        # LookAway: run the negative-view teacher forward on the SAME EMA
                         # teacher state (both happen before the post-loop EMA update) and
                         # turn the per-token log-prob difference into loss weights.
                         vd_weights = None
@@ -1101,18 +1103,19 @@ class DataParallelPPOActor(BasePPOActor):
                             if self_distillation_mask is not None:
                                 loss_mask_mb = loss_mask_mb * self_distillation_mask.unsqueeze(1)
                             vd_neg_view_mask = model_inputs.get("vd_neg_view_mask")
+                            vd_valid_mask = loss_mask_mb
                             if vd_neg_view_mask is not None:
-                                loss_mask_mb = loss_mask_mb * vd_neg_view_mask.unsqueeze(1)
+                                vd_valid_mask = vd_valid_mask * vd_neg_view_mask.unsqueeze(1)
+                            valid_pos = vd_valid_mask.bool()
 
                             delta_diff = (teacher_log_prob - teacher_neg_log_prob).detach()
                             abs_dd = delta_diff.abs()
                             vd_tau = self_distillation_cfg.get("vd_tau", 2.0)
                             if self_distillation_cfg.get("vd_dual_signal", False):
-                                # v2: dual-signal voting = teacher view-sensitivity x student error;
+                                # Dual-signal voting = teacher view-sensitivity x student error;
                                 # dynamic knees at batch p90 keep contrast alive as distributions drift.
                                 # Knees use only valid (loss-masked) tokens: pad positions carry
                                 # real next-token logits that would contaminate the quantiles.
-                                valid_pos = loss_mask_mb.bool()
                                 has_valid = valid_pos.any()
                                 if has_valid:
                                     tau_dd = abs_dd.detach()[valid_pos].quantile(0.9).clamp(min=0.25)
@@ -1135,10 +1138,10 @@ class DataParallelPPOActor(BasePPOActor):
                                 bonus = abs_dd / (abs_dd + vd_tau)
                             w_raw = 1.0 + vd_gamma * bonus
                             if self_distillation_cfg.get("vd_targeted", False):
-                                # v3: extrapolation leg on top of the v2 base weight. Eligibility
+                                # The targeted extrapolation leg builds on the base weight. Eligibility
                                 # is view-dependence-first (s_dd above its valid-token batch p90),
                                 # refined by frozen priors: word selection rate >= rate_cut and the
-                                # context bigram not being a corpus template (df < tmpl_cut). This
+                                # context bigram not being in the frozen template set. This
                                 # routes the extra force to answer-assertion tokens instead of the
                                 # pointing ritual that the eps leg used to monopolize.
                                 vd_lambda = self_distillation_cfg.get("vd_lambda", 4.0)
@@ -1148,25 +1151,25 @@ class DataParallelPPOActor(BasePPOActor):
                                     theta_dd = s_dd.detach()[valid_pos].quantile(0.9)
                                 else:
                                     theta_dd = s_dd.new_tensor(0.5)
-                                resp_ids = model_inputs["responses"]
-                                rate_ok = torch.ones_like(s_dd, dtype=torch.bool)
-                                tmpl_ok = torch.ones_like(s_dd, dtype=torch.bool)
-                                for bi in range(resp_ids.shape[0]):
-                                    for ti in torch.nonzero(loss_mask_mb[bi] > 0, as_tuple=False).flatten().tolist():
-                                        rid = int(resp_ids[bi, ti])
+                                resp_ids_cpu = model_inputs["responses"].detach().cpu()
+                                valid_pos_cpu = valid_pos.detach().cpu()
+                                rate_ok_cpu = torch.ones_like(valid_pos_cpu, dtype=torch.bool)
+                                tmpl_ok_cpu = torch.ones_like(valid_pos_cpu, dtype=torch.bool)
+                                for bi in range(resp_ids_cpu.shape[0]):
+                                    for ti in torch.nonzero(valid_pos_cpu[bi], as_tuple=False).flatten().tolist():
+                                        rid = int(resp_ids_cpu[bi, ti])
                                         if rate_by_id.get(rid, 0.10) < rate_cut:
-                                            rate_ok[bi, ti] = False
-                                        # boundary guard: only trust ti-1 as "previous token" when
-                                        # it sits inside the same (masked) sequence. Packed-row
-                                        # concatenation boundaries (mask 1->1 across samples) remain
-                                        # a <0.1% bigram-noise on an 18-pair gate -- accepted.
+                                            rate_ok_cpu[bi, ti] = False
+                                        # Only use a preceding valid token from the same response.
                                         if (
                                             ti > 0
-                                            and float(loss_mask_mb[bi, ti - 1]) > 0
-                                            and (int(resp_ids[bi, ti - 1]), rid) in tmpl_pairs
+                                            and bool(valid_pos_cpu[bi, ti - 1])
+                                            and (int(resp_ids_cpu[bi, ti - 1]), rid) in tmpl_pairs
                                         ):
-                                            tmpl_ok[bi, ti] = False
-                                elig = (s_dd > theta_dd) & rate_ok & tmpl_ok
+                                            tmpl_ok_cpu[bi, ti] = False
+                                rate_ok = rate_ok_cpu.to(s_dd.device)
+                                tmpl_ok = tmpl_ok_cpu.to(s_dd.device)
+                                elig = (s_dd > theta_dd) & rate_ok & tmpl_ok & valid_pos
                                 # funnel pass-rates over valid tokens: dd gate -> word-rate gate
                                 # -> template gate (ext_fraction_pre_jsd) -> JSD gate (ext_fraction)
                                 micro_batch_metrics["self_distillation/votedistill/gate_dd_fraction"] = (
@@ -1182,9 +1185,6 @@ class DataParallelPPOActor(BasePPOActor):
                                     # near-zero loss on tokens the student already reproduces.
                                     if student_topk_logps is None or teacher_topk_logps is None:
                                         raise ValueError("vd_jsd_gate requires top-k distillation.")
-                                    import math
-                                    import torch.nn.functional as F
-
                                     # gate-only statistics: no autograd graph, fp32 for quantile precision
                                     with torch.no_grad():
                                         s_topk, t_topk = student_topk_logps.float(), teacher_topk_logps.float()
@@ -1195,20 +1195,7 @@ class DataParallelPPOActor(BasePPOActor):
                                             s_topk = s_topk - torch.logsumexp(s_topk, dim=-1, keepdim=True)
                                             t_topk = t_topk - torch.logsumexp(t_topk, dim=-1, keepdim=True)
                                         alpha_jsd = float(self_distillation_cfg.get("alpha", 1.0))
-                                        if 0.0 < alpha_jsd < 1.0:
-                                            mixture = torch.logsumexp(
-                                                torch.stack(
-                                                    [s_topk + math.log(1.0 - alpha_jsd), t_topk + math.log(alpha_jsd)]
-                                                ),
-                                                dim=0,
-                                            )
-                                            jsd_tok = torch.lerp(
-                                                F.kl_div(mixture, s_topk, reduction="none", log_target=True).sum(-1),
-                                                F.kl_div(mixture, t_topk, reduction="none", log_target=True).sum(-1),
-                                                alpha_jsd,
-                                            )
-                                        else:
-                                            jsd_tok = F.kl_div(s_topk, t_topk, reduction="none", log_target=True).sum(-1)
+                                        jsd_tok = token_distillation_divergence(s_topk, t_topk, alpha_jsd)
                                     if has_valid:
                                         jsd_thr = jsd_tok[valid_pos].quantile(float(self_distillation_cfg.get("vd_jsd_q", 0.5)))
                                     else:
@@ -1222,16 +1209,11 @@ class DataParallelPPOActor(BasePPOActor):
                                 micro_batch_metrics["self_distillation/votedistill/ext_fraction"] = (
                                     (elig & valid_pos).float().sum() / valid_pos.float().sum().clamp(min=1.0)
                                 ).item()
-                            w_raw = w_raw * loss_mask_mb.to(w_raw.dtype)
+                            # Normalize only tokens that have a real negative view. Tokens from
+                            # rows without one retain weight 1, preserving baseline distillation.
+                            vd_weights = normalize_vd_weights(w_raw, valid_pos)
 
-                            denom = w_raw.detach().sum().clamp(min=1.0)
-                            token_count = loss_mask_mb.sum().to(w_raw.dtype).detach().clamp(min=1.0)
-                            # Mean-preserving normalization: sum(w) == token_count within the
-                            # micro batch, so the existing token-mean aggregation (which divides
-                            # by the global batch_num_tokens) keeps the baseline loss scale.
-                            vd_weights = w_raw * (token_count / denom)
-
-                            valid_flat = loss_mask_mb.reshape(-1) > 0
+                            valid_flat = valid_pos.reshape(-1)
                             if valid_flat.any():
                                 dd_flat = delta_diff.reshape(-1)[valid_flat].float()
                                 w_flat = vd_weights.reshape(-1)[valid_flat].float()

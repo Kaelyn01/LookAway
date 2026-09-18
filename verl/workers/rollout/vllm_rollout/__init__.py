@@ -1,4 +1,3 @@
-import torch  # ensure libc10 loads before vllm._C (MessageLogger symbol fix)
 # Copyright 2024 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,6 +13,8 @@ import torch  # ensure libc10 loads before vllm._C (MessageLogger symbol fix)
 # limitations under the License.
 import os
 from importlib.metadata import PackageNotFoundError, version
+
+import torch  # noqa: F401 - preload libc10 before importing vllm._C
 
 from .vllm_rollout import vLLMAsyncRollout  # noqa: F401
 

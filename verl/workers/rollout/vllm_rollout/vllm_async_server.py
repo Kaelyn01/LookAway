@@ -1,4 +1,3 @@
-import torch  # ensure libc10 loads before vllm._C (MessageLogger symbol fix)
 # Copyright 2024 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,6 +25,7 @@ from uuid import uuid4
 import cloudpickle as pickle
 import numpy as np
 import ray
+import torch  # noqa: F401 - preload libc10 before importing vllm._C
 import vllm.entrypoints.cli.serve
 import zmq
 from packaging import version

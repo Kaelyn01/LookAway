@@ -22,6 +22,8 @@ Outputs (under --data-dir):
     train.parquet     training file with the negative-view column
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -33,8 +35,8 @@ from multiprocessing import Pool
 from typing import Any
 
 import cv2
-import numpy as np
 import datasets
+import numpy as np
 from PIL import Image
 
 PAD_RATIO = 0.105   # assumed official crop padding ratio
@@ -69,7 +71,15 @@ def download_dataset(repo_id: str, data_dir: str) -> None:
         if not tars:
             continue
         print(f"Extracting {sub} ...")
-        subprocess.run(f"cat {' '.join(tars)} | tar -xf - -C .", shell=True, cwd=d, check=True)
+        cat_process = subprocess.Popen(["cat", *tars], cwd=d, stdout=subprocess.PIPE)
+        try:
+            subprocess.run(["tar", "-xf", "-", "-C", "."], cwd=d, stdin=cat_process.stdout, check=True)
+        finally:
+            if cat_process.stdout is not None:
+                cat_process.stdout.close()
+            cat_returncode = cat_process.wait()
+        if cat_returncode != 0:
+            raise subprocess.CalledProcessError(cat_process.returncode, cat_process.args)
         for f in tars:
             os.remove(os.path.join(d, f))
 
@@ -161,7 +171,7 @@ def _worker(i):
         window = (max(0, nx1 - dx), max(0, ny1 - dy), min(W, nx2 + dx), min(H, ny2 + dy))
         tneg = drawn_neg.crop(window).resize(official.size, Image.LANCZOS)
 
-        tneg.save(os.path.join(data_dir, "teacher_neg", "%06d.png" % i), compress_level=1)
+        tneg.save(os.path.join(data_dir, "teacher_neg", f"{i:06d}.png"), compress_level=1)
         return {"idx": i, "ok": True, "gt_bbox": [int(v) for v in gt], "neg_bbox": list(neg),
                 "iou": round(iou(neg, gt), 4), "crop_size": [int(v) for v in official.size]}
     except Exception as e:
@@ -169,21 +179,24 @@ def _worker(i):
 
 
 def generate_negative_views(data_dir: str, nproc: int) -> list:
-    rows = [json.loads(l) for l in open(os.path.join(data_dir, "train.jsonl"), encoding="utf-8")]
+    with open(os.path.join(data_dir, "train.jsonl"), encoding="utf-8") as f:
+        rows = [json.loads(line) for line in f]
     os.makedirs(os.path.join(data_dir, "teacher_neg"), exist_ok=True)
 
     t0 = time.time()
     results = []
     with Pool(nproc, initializer=_init_worker, initargs=(rows, data_dir)) as pool:
-        for n, r in enumerate(pool.imap_unordered(_worker, range(len(_ROWS)), chunksize=16), 1):
+        for n, r in enumerate(pool.imap_unordered(_worker, range(len(rows)), chunksize=16), 1):
             results.append(r)
             if n % 500 == 0:
                 ok = sum(1 for x in results if x.get("ok"))
-                print(f"[{n}/{len(_ROWS)}] ok={ok} elapsed={time.time() - t0:.0f}s", flush=True)
+                print(f"[{n}/{len(rows)}] ok={ok} elapsed={time.time() - t0:.0f}s", flush=True)
     results.sort(key=lambda r: r["idx"])
-    json.dump(results, open(os.path.join(data_dir, "results.json"), "w"), ensure_ascii=False, indent=1)
+    with open(os.path.join(data_dir, "results.json"), "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=1)
     ok = sum(1 for r in results if r.get("ok"))
-    print(f"Negative views: {ok}/{len(results)} ({100 * ok / len(results):.1f}%) "
+    success_rate = 100 * ok / len(results) if results else 0.0
+    print(f"Negative views: {ok}/{len(results)} ({success_rate:.1f}%) "
           f"in {(time.time() - t0) / 60:.1f} min")
     return results
 
@@ -211,8 +224,7 @@ def build_record(item: dict[str, Any], data_dir: str, neg_path: str | None) -> d
             "source_extra_info": item.get("extra_info", {}),
         },
     }
-    if neg_path is not None:
-        record["neg_bbox_images"] = [{"path": neg_path}]
+    record["neg_bbox_images"] = [{"path": neg_path}] if neg_path is not None else []
     return record
 
 
@@ -228,7 +240,7 @@ def convert_to_parquet(data_dir: str, results: list) -> None:
     with open(jsonl_path, encoding="utf-8") as f:
         for i, line in enumerate(f):
             item = json.loads(line)
-            neg = os.path.join(data_dir, "teacher_neg", "%06d.png" % i) if by_idx_ok.get(i) else None
+            neg = os.path.join(data_dir, "teacher_neg", f"{i:06d}.png") if by_idx_ok.get(i) else None
             records.append(build_record(item, data_dir, neg))
 
     dataset = datasets.Dataset.from_list(records)

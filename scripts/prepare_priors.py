@@ -29,12 +29,17 @@ from collections import defaultdict
 import numpy as np
 import torch
 from PIL import Image
-from transformers import AutoTokenizer, AutoProcessor, AutoModelForImageTextToText
+from transformers import AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
 
 ALPHA, BASE = 50.0, 0.10   # empirical-Bayes pseudo-counts
 BATCH = 16
 TMPL_DF_CUT = 0.25
 MAX_NEW_TOKENS = 96
+DEFAULT_CHAT_TEMPLATE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "chat_templates",
+    "perception_chat_template_qwen35.jinja",
+)
 
 
 def parse_args():
@@ -44,27 +49,60 @@ def parse_args():
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--limit", type=int, default=0,
                     help=">0: use only the first N samples (smoke test)")
-    ap.add_argument("--chat-template", default=None,
-                    help="Optional path to the training chat template (e.g. "
-                         "chat_templates/perception_chat_template_qwen35.jinja); by default "
-                         "the processor's own template is used")
+    ap.add_argument(
+        "--chat-template",
+        default=DEFAULT_CHAT_TEMPLATE,
+        help="Path to the training chat template (defaults to the repository's Qwen3.5 template)",
+    )
     return ap.parse_args()
 
 
-def build_inputs(proc, img_path, question, answer=None, device="cuda", chat_template=None):
-    content = [{"type": "image", "image": img_path},
-               {"type": "text", "text": question.replace("<image>\n", "")}]
+def generated_answer_ids(generated_ids, tokenizer):
+    """Keep rollout token IDs while trimming terminal generation-control tokens."""
+    token_ids = generated_ids.tolist() if hasattr(generated_ids, "tolist") else list(generated_ids)
+    special_ids = set(tokenizer.all_special_ids)
+    while token_ids and int(token_ids[-1]) in special_ids:
+        token_ids.pop()
+    return [int(token_id) for token_id in token_ids]
+
+
+def find_answer_start(input_ids, answer_ids, search_window=16):
+    """Locate the assistant answer near the end of a templated sequence."""
+    if not answer_ids:
+        raise ValueError("Cannot score an empty generated answer.")
+    first_start = max(0, len(input_ids) - len(answer_ids) - search_window)
+    for start in range(len(input_ids) - len(answer_ids), first_start - 1, -1):
+        if input_ids[start : start + len(answer_ids)] == answer_ids:
+            return start
+    raise ValueError("Generated answer token IDs were not found in the templated scoring input.")
+
+
+def build_inputs(proc, img_path, question, answer_ids=None, device="cuda", chat_template=None):
+    content = [
+        {"type": "image", "image": img_path},
+        {"type": "text", "text": question.replace("<image>", "", 1)},
+    ]
     msgs = [{"role": "user", "content": content}]
-    if answer is not None:
-        msgs.append({"role": "assistant", "content": answer})
     kwargs = {}
     if chat_template is not None:
         with open(chat_template, encoding="utf-8") as f:
             kwargs["chat_template"] = f.read()
-    text = proc.apply_chat_template(msgs, tokenize=False, add_generation_prompt=(answer is None),
-                                    enable_thinking=False, **kwargs)
+    text = proc.apply_chat_template(
+        msgs, tokenize=False, add_generation_prompt=True, enable_thinking=False, **kwargs
+    )
     img = Image.open(img_path).convert("RGB")
     inputs = proc(text=[text], images=[img], return_tensors="pt").to(device)
+    if answer_ids is not None:
+        prompt_length = inputs["input_ids"].shape[1]
+        answer_tensor = torch.tensor(answer_ids, dtype=inputs["input_ids"].dtype, device=device).unsqueeze(0)
+        inputs["input_ids"] = torch.cat([inputs["input_ids"], answer_tensor], dim=1)
+        answer_mask = torch.ones_like(answer_tensor, dtype=inputs["attention_mask"].dtype)
+        inputs["attention_mask"] = torch.cat([inputs["attention_mask"], answer_mask], dim=1)
+        for key in ("token_type_ids", "mm_token_type_ids"):
+            value = inputs.get(key)
+            if value is not None and value.ndim == 2 and value.shape[1] == prompt_length:
+                answer_types = torch.zeros_like(answer_tensor, dtype=value.dtype)
+                inputs[key] = torch.cat([value, answer_types], dim=1)
     return inputs
 
 
@@ -72,13 +110,15 @@ def run_dump(args, tok, proc, model):
     """Stage 1: three-view greedy scoring dump (rows with a failed negative
     view in prepare_data.py are skipped)."""
     out_path = os.path.join(args.data_dir, "token_scores_full.jsonl")
-    rows = [json.loads(l) for l in open(os.path.join(args.data_dir, "train.jsonl"), encoding="utf-8")]
+    with open(os.path.join(args.data_dir, "train.jsonl"), encoding="utf-8") as f:
+        rows = [json.loads(line) for line in f]
     if args.limit > 0:
         rows = rows[:args.limit]
 
     results_path = os.path.join(args.data_dir, "results.json")
     if os.path.exists(results_path):
-        ok = {r["idx"] for r in json.load(open(results_path)) if r.get("ok")}
+        with open(results_path, encoding="utf-8") as f:
+            ok = {record["idx"] for record in json.load(f) if record.get("ok")}
     else:
         ok = set(range(len(rows)))
     skipped = [i for i in range(len(rows)) if i not in ok]
@@ -88,69 +128,82 @@ def run_dump(args, tok, proc, model):
               f"(first few: {skipped[:5]}); their priors contribution is dropped.")
 
     tpl = args.chat_template
-    fout = open(out_path, "w")
     n_written = 0
-    for i, h in enumerate(rows):
-        if i not in ok:
-            continue
-        q = h["extra_info"]["question"]
+    with open(out_path, "w", encoding="utf-8") as fout:
+        for i, h in enumerate(rows):
+            if i not in ok:
+                continue
+            q = h["problem"]
 
-        # 1) greedy student rollout
-        inputs = build_inputs(proc, os.path.join(args.data_dir, h["images"][0]), q,
-                              device=args.device, chat_template=tpl)
-        with torch.no_grad():
-            out = model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS, do_sample=False,
-                                 pad_token_id=tok.eos_token_id)
-        gen_ids = out[0][inputs["input_ids"].shape[1]:]
-        answer = tok.decode(gen_ids, skip_special_tokens=True).strip()
-        ans_ids = tok(answer, add_special_tokens=False)["input_ids"]
-        K = len(ans_ids)
-
-        # 2) three-view scoring
-        lps = {}
-        views = {
-            "student": os.path.join(args.data_dir, h["images"][0]),
-            "pos": os.path.join(args.data_dir, h["teacher_images"][0]),
-            "neg": os.path.join(args.data_dir, "teacher_neg", "%06d.png" % i),
-        }
-        for tag, img_path in views.items():
-            inputs = build_inputs(proc, img_path, q, answer, device=args.device, chat_template=tpl)
+            # 1) greedy student rollout
+            inputs = build_inputs(
+                proc,
+                os.path.join(args.data_dir, h["images"][0]),
+                q,
+                device=args.device,
+                chat_template=tpl,
+            )
             with torch.no_grad():
-                logits = model(**inputs).logits[0]
-            lp = torch.log_softmax(logits.float(), dim=-1)
-            ids = inputs["input_ids"][0]
-            idl = ids.tolist()
-            pos_ans = None
-            for st in range(len(idl) - K, max(0, len(idl) - K - 10), -1):
-                if idl[st:st + K] == ans_ids:
-                    pos_ans = st
-                    break
-            if pos_ans is None:
-                pos_ans = len(idl) - K - 1
-            vals = []
-            for j in range(K):
-                t_pos = pos_ans + j
-                vals.append(lp[t_pos - 1, idl[t_pos]].item())
-            lps[tag] = vals
+                out = model.generate(
+                    **inputs, max_new_tokens=MAX_NEW_TOKENS, do_sample=False, pad_token_id=tok.eos_token_id
+                )
+            gen_ids = out[0][inputs["input_ids"].shape[1] :]
+            ans_ids = generated_answer_ids(gen_ids, tok)
+            if not ans_ids:
+                print(f"Skipping row {i}: model generated no content tokens.")
+                continue
+            answer = tok.decode(ans_ids, skip_special_tokens=False)
+            K = len(ans_ids)
 
-        # 3) per-token deltas (relative to the student score)
-        rec = {"n": n_written, "idx": i, "gt": h.get("answer", ""), "answer": answer,
-               "question": q[:100], "tokens": []}
-        toks = tok.convert_ids_to_tokens(ans_ids)
-        for j, t in enumerate(toks):
-            ds = lps["student"][j]
-            rec["tokens"].append({
-                "tok": t,
-                "lp_s": round(ds, 4),
-                "d_plus": round(lps["pos"][j] - ds, 4),
-                "d_minus": round(lps["neg"][j] - ds, 4),
-            })
-        fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        fout.flush()
-        n_written += 1
-        if n_written % 100 == 0:
-            print(f"dump [{n_written}/{total}]", flush=True)
-    fout.close()
+            # 2) three-view scoring
+            lps = {}
+            views = {
+                "student": os.path.join(args.data_dir, h["images"][0]),
+                "pos": os.path.join(args.data_dir, h["teacher_images"][0]),
+                "neg": os.path.join(args.data_dir, "teacher_neg", f"{i:06d}.png"),
+            }
+            for tag, img_path in views.items():
+                inputs = build_inputs(proc, img_path, q, ans_ids, device=args.device, chat_template=tpl)
+                with torch.no_grad():
+                    logits = model(**inputs).logits[0]
+                lp = torch.log_softmax(logits.float(), dim=-1)
+                ids = inputs["input_ids"][0]
+                idl = ids.tolist()
+                try:
+                    pos_ans = find_answer_start(idl, ans_ids)
+                except ValueError as exc:
+                    raise ValueError(f"Unable to align answer tokens for row {i}, view {tag}.") from exc
+                vals = []
+                for j in range(K):
+                    t_pos = pos_ans + j
+                    vals.append(lp[t_pos - 1, idl[t_pos]].item())
+                lps[tag] = vals
+
+            # 3) per-token deltas (relative to the student score)
+            rec = {
+                "n": n_written,
+                "idx": i,
+                "gt": h.get("answer", ""),
+                "answer": answer,
+                "question": q[:100],
+                "tokens": [],
+            }
+            toks = tok.convert_ids_to_tokens(ans_ids)
+            for j, token in enumerate(toks):
+                student_lp = lps["student"][j]
+                rec["tokens"].append(
+                    {
+                        "tok": token,
+                        "lp_s": round(student_lp, 4),
+                        "d_plus": round(lps["pos"][j] - student_lp, 4),
+                        "d_minus": round(lps["neg"][j] - student_lp, 4),
+                    }
+                )
+            fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            fout.flush()
+            n_written += 1
+            if n_written % 100 == 0:
+                print(f"dump [{n_written}/{total}]", flush=True)
     print(f"Token dump written: {out_path}")
     return out_path
 
@@ -158,11 +211,18 @@ def run_dump(args, tok, proc, model):
 def run_priors(args, dump_path, tok):
     """Stage 2: frozen priors from the dump."""
     recs = []
-    for i, line in enumerate(open(dump_path, errors="ignore")):
-        r = json.loads(line)
-        recs.append([(str(t["tok"]), abs(t["d_plus"] - t["d_minus"]), abs(t["d_plus"]))
-                     for t in r["tokens"]])
+    with open(dump_path, encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            record = json.loads(line)
+            recs.append(
+                [
+                    (str(token["tok"]), abs(token["d_plus"] - token["d_minus"]), abs(token["d_plus"]))
+                    for token in record["tokens"]
+                ]
+            )
     N = len(recs)
+    if N == 0:
+        raise ValueError("Token dump is empty; cannot build LookAway priors.")
 
     sel, occ = defaultdict(int), defaultdict(int)
     for b in range(0, N, BATCH):
@@ -203,8 +263,18 @@ def run_priors(args, dump_path, tok):
         if p is not None and c is not None:
             tmpl_ids.append([p, c])
 
-    meta = {"n_samples": N, "alpha": ALPHA, "base": BASE, "tmpl_df_cut": TMPL_DF_CUT,
-            "rate_cut": 0.12, "n_rate": len(rate_ids), "n_tmpl": len(tmpl_ids), "id_miss": miss}
+    meta = {
+        "n_samples": N,
+        "model_path": args.model_path,
+        "chat_template": os.path.abspath(args.chat_template) if args.chat_template else None,
+        "alpha": ALPHA,
+        "base": BASE,
+        "tmpl_df_cut": TMPL_DF_CUT,
+        "rate_cut": 0.12,
+        "n_rate": len(rate_ids),
+        "n_tmpl": len(tmpl_ids),
+        "id_miss": miss,
+    }
     out = os.path.join(args.data_dir, "token_priors.json")
     json.dump({"rate": rate_ids, "tmpl": tmpl_ids, "meta": meta}, open(out, "w"))
     print(f"Priors written: {out}")

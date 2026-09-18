@@ -4,7 +4,7 @@ import hashlib
 import json
 import mimetypes
 import os
-import sys
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,12 +24,22 @@ def pick_image_path(item):
 
 
 def make_sample_uid(item, benchmark):
-    for key in ("sample_uid", "uid", "index", "question_id", "id"):
+    sample_uid = item.get("sample_uid")
+    legacy_prefixes = tuple(f"{benchmark}:{key}:" for key in ("index", "question_id", "id"))
+    if sample_uid is not None and str(sample_uid) != "" and not str(sample_uid).startswith(legacy_prefixes):
+        return str(sample_uid)
+    for key in ("uid",):
         value = item.get(key)
         if value is not None and str(value) != "":
             return f"{benchmark}:{key}:{value}"
     stable_obj = {
         "benchmark": benchmark,
+        "index": item.get("index"),
+        "question_id": item.get("question_id"),
+        "id": item.get("id"),
+        "type": item.get("type"),
+        "task": item.get("task"),
+        "source": item.get("source"),
         "images": item.get("images") or [],
         "query": item.get("query", ""),
     }
@@ -64,7 +74,10 @@ def compact_existing_output(path, benchmark):
             except Exception:
                 changed = True
                 continue
-            sample_uid = record.get("sample_uid") or make_sample_uid(record, benchmark)
+            old_sample_uid = record.get("sample_uid")
+            sample_uid = make_sample_uid(record, benchmark)
+            if old_sample_uid != sample_uid:
+                changed = True
             record["sample_uid"] = sample_uid
             if sample_uid not in best_records:
                 ordered_uids.append(sample_uid)
@@ -102,8 +115,9 @@ def normalize_model_answer(model_answer_raw):
     end = model_answer_raw.find("</answer>", start + len("<answer>")) if start != -1 else -1
     if start != -1 and end != -1 and end > start:
         return model_answer_raw[start + len("<answer>"):end].strip()
-    if "Answer:" in model_answer_raw:
-        return model_answer_raw[model_answer_raw.find("Answer:"):].strip()
+    answer_match = re.search(r"(?i)answer\s*:\s*(.*)", model_answer_raw, flags=re.DOTALL)
+    if answer_match:
+        return answer_match.group(1).strip()
     return model_answer_raw.strip()
 
 
@@ -226,7 +240,7 @@ def main():
                     **extra_kwargs,
                 )
                 raw_model_answer = (resp.choices[0].message.content or "").strip()
-                model_answer = raw_model_answer
+                model_answer = normalize_model_answer(raw_model_answer)
                 break
             except Exception as e:
                 if attempt == args.max_retries:
@@ -240,7 +254,10 @@ def main():
         return record
 
     start = time.time()
-    with ThreadPoolExecutor(max_workers=args.parallel_workers) as executor, open(out_path, "a", encoding="utf-8") as f_out:
+    with (
+        ThreadPoolExecutor(max_workers=args.parallel_workers) as executor,
+        open(out_path, "a", encoding="utf-8") as f_out,
+    ):
         future_to_item = {executor.submit(run_one, item): item for item in todo_data}
         with tqdm(total=len(todo_data), desc="Inference", unit="case", dynamic_ncols=True) as pbar:
             for future in as_completed(future_to_item):

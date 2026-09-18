@@ -1140,7 +1140,7 @@ class RayPPOTrainer:
         self_distillation_cfg,
         device: torch.device,
     ) -> tuple[dict[str, torch.Tensor], dict[str, list[Any]], dict[str, float]]:
-        """VoteDistill: build teacher inputs with the negative (misaligned crop) image.
+        """LookAway: build teacher inputs with the negative (misaligned crop) image.
 
         Mirrors the teacher_always_on input construction but swaps in the
         teacher_neg_image_key column, so lp_T-(y_t) comes from the same EMA
@@ -1184,7 +1184,7 @@ class RayPPOTrainer:
             has_neg_images = self._teacher_images_available(neg_images)
             teacher_present_mask_list.append(1.0 if has_neg_images else 0.0)
             if not has_neg_images:
-                # keep the forward valid; vd_neg_view_mask=0 neutralizes these rows' weights
+                # Keep the forward valid; vd_neg_view_mask=0 leaves these rows at baseline weight 1.
                 neg_images = self._extract_images_from_messages(list(batch.non_tensor_batch["raw_prompt"][i]))
 
             teacher_messages = self._prepare_teacher_messages(
