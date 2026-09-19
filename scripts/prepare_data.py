@@ -8,9 +8,9 @@ This script:
 1. Downloads the Vision-OPD-6K dataset from HuggingFace
    (train.jsonl, student images, teacher crops)
 2. Generates the negative teacher views: a red box drawn at a displaced
-   position (IoU < 0.1 vs the ground-truth box), cropped with padding matched
-   to the official positive crop and resized to its size, so both teacher
-   views share the same visual format
+   position (IoU < 0.1 vs the ground-truth box), using the exact recovered
+   positive crop window size, within-crop box, Pillow stroke, and 2x resize.
+   The official positive is reconstructed pixel-exactly before generation
 3. Converts train.jsonl to train.parquet and attaches the `neg_bbox_images`
    column, producing the LookAway training file
 
@@ -25,6 +25,8 @@ Outputs (under --data-dir):
 from __future__ import annotations
 
 import argparse
+import hashlib
+import itertools
 import json
 import os
 import random
@@ -37,10 +39,9 @@ from typing import Any
 import cv2
 import datasets
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
-PAD_RATIO = 0.105   # assumed official crop padding ratio
-THICK = 3           # red box stroke width (measured from official crops)
+FRAME_WIDTH = 5     # verified against every official teacher image
 NEG_IOU_LIMIT = 0.1
 
 
@@ -95,23 +96,111 @@ def iou(a, b):
     return inter / ua if ua else 0.0
 
 
-def measure_expand(drawn_np, gt):
-    """Measure the official box stroke expansion around the GT box on a
-    red-boxed image; used to replicate the exact visual format."""
-    x1, y1, x2, y2 = gt
-    H, W = drawn_np.shape[:2]
-    band = 30
-    sx1, sy1 = max(0, x1 - band), max(0, y1 - band)
-    sx2, sy2 = min(W, x2 + band), min(H, y2 + band)
-    sub = drawn_np[sy1:sy2, sx1:sx2]
-    r, g, b = sub[..., 0].astype(int), sub[..., 1].astype(int), sub[..., 2].astype(int)
-    m = (r > 245) & (g < 25) & (b < 25)
-    if m.sum() < 20:
-        return None
-    ys, xs = np.where(m)
-    leftmost, rightmost = sx1 + xs.min(), sx1 + xs.max()
-    topmost, bottommost = sy1 + ys.min(), sy1 + ys.max()
-    return (max(0, x1 - leftmost), max(0, y1 - topmost), max(0, rightmost - x2), max(0, bottommost - y2))
+def project_bands(values):
+    indices = np.flatnonzero(values >= values.max() * 0.65)
+    return [group for group in np.split(indices, np.flatnonzero(np.diff(indices) > 1) + 1) if len(group)]
+
+
+def recover_geometry(original, official, gt):
+    w, h = official.size
+    if w % 2 or h % 2:
+        raise ValueError("Official teacher dimensions must match the verified 2x pipeline")
+    cw, ch = w // 2, h // 2
+    pixels = np.array(official)
+    red = (pixels[:, :, 0] > 245) & (pixels[:, :, 1] < 25) & (pixels[:, :, 2] < 25)
+    xb, yb = project_bands(red.sum(0)), project_bands(red.sum(1))
+    if len(xb) < 2 or len(yb) < 2:
+        return recover_difficult(original, official, gt)
+    box = [int(xb[0][0]) // 2, int(yb[0][0]) // 2, int(xb[-1][-1]) // 2, int(yb[-1][-1]) // 2]
+    if xb[-1][-1] == w - 1:
+        box[2] = cw
+    if yb[-1][-1] == h - 1:
+        box[3] = ch
+    x = max(0, min(original.width - cw, int((gt[0] + gt[2] - cw) / 2)))
+    y = max(0, min(original.height - ch, int((gt[1] + gt[3] - ch) / 2)))
+    small = np.array(official.resize((cw, ch), Image.Resampling.BOX))
+    strong = (
+        (small[:, :, 0].astype(int) > small[:, :, 1] * 1.5)
+        & (small[:, :, 0].astype(int) > small[:, :, 2] * 1.5)
+        & (small[:, :, 0] > 150)
+    )
+    valid = 1 - cv2.dilate(strong.astype("uint8"), np.ones((7, 7), np.uint8))
+    sx, sy = max(0, x - 4), max(0, y - 4)
+    ex, ey = min(original.width, x + cw + 5), min(original.height, y + ch + 5)
+    if valid.sum() == 0:
+        return recover_difficult(original, official, gt)
+    scores = cv2.matchTemplate(
+        np.array(original.crop((sx, sy, ex, ey))).astype("float32"),
+        small.astype("float32"),
+        cv2.TM_SQDIFF,
+        mask=np.repeat(valid[:, :, None], 3, axis=2),
+    )
+    _, _, loc, _ = cv2.minMaxLoc(scores)
+    ox, oy = sx + loc[0], sy + loc[1]
+    source_crop = original.crop((ox, oy, ox + cw, oy + ch))
+
+    def compare(candidate):
+        drawn = source_crop.copy()
+        ImageDraw.Draw(drawn).rectangle(candidate, outline=(255, 0, 0), width=FRAME_WIDTH)
+        return np.array(drawn.resize((w, h), Image.Resampling.LANCZOS))
+
+    rebuilt = compare(box)
+    if not np.array_equal(rebuilt, pixels):
+        # Natural red content can move a threshold edge by one pixel.
+        choices = [[v, v - 1, v + 1] for v in box]
+        for candidate in itertools.product(*choices):
+            if np.array_equal(compare(candidate), pixels):
+                box = list(candidate)
+                break
+        else:
+            return recover_difficult(original, official, gt)
+    return {
+        "positive_crop_window": [ox, oy, ox + cw, oy + ch],
+        "frame_box_in_crop": box,
+        "source_crop_size": [cw, ch],
+        "output_size": [w, h],
+        "resize_scale": [2, 2],
+        "frame_width": FRAME_WIDTH,
+        "reconstruction_exact": True,
+    }
+
+
+def recover_difficult(original, official, gt):
+    w, h = official.size
+    cw, ch = w // 2, h // 2
+    pixels = np.array(official)
+    x = max(0, min(original.width - cw, int((gt[0] + gt[2] - cw) / 2)))
+    y = max(0, min(original.height - ch, int((gt[1] + gt[3] - ch) / 2)))
+    offsets = [0, 1, -1, 2, -2]
+    for ox, oy in itertools.product(
+        [x + v for v in offsets if 0 <= x + v <= original.width - cw],
+        [y + v for v in offsets if 0 <= y + v <= original.height - ch],
+    ):
+        crop = original.crop((ox, oy, ox + cw, oy + ch))
+        bw, bh = gt[2] - gt[0], gt[3] - gt[1]
+        estimate = [
+            int(gt[0] - bw * 0.05) - ox,
+            int(gt[1] - bh * 0.05) - oy,
+            int(gt[2] + bw * 0.05) - ox,
+            int(gt[3] + bh * 0.05) - oy,
+        ]
+        options = [[v + d for d in [0, 1, -1, 2, -2]] for v in estimate]
+        for box in itertools.product(*options):
+            if box[2] < box[0] or box[3] < box[1]:
+                continue
+            drawn = crop.copy()
+            ImageDraw.Draw(drawn).rectangle(box, outline="red", width=FRAME_WIDTH)
+            if np.array_equal(np.array(drawn.resize((w, h), Image.Resampling.LANCZOS)), pixels):
+                return {
+                    "positive_crop_window": [ox, oy, ox + cw, oy + ch],
+                    "frame_box_in_crop": list(box),
+                    "source_crop_size": [cw, ch],
+                    "output_size": [w, h],
+                    "resize_scale": [2, 2],
+                    "frame_width": FRAME_WIDTH,
+                    "reconstruction_exact": True,
+                }
+    raise ValueError("No exact transform found for difficult sample")
 
 
 _ROWS = None
@@ -125,58 +214,81 @@ def _init_worker(rows, data_dir):
     _DATA_DIR = data_dir
 
 
+def render_teacher(original, window, geometry):
+    crop = original.crop(window)
+    if list(crop.size) != geometry["source_crop_size"]:
+        raise ValueError("Crop size differs from the official positive template")
+    ImageDraw.Draw(crop).rectangle(geometry["frame_box_in_crop"], outline=(255, 0, 0), width=FRAME_WIDTH)
+    return crop.resize(tuple(geometry["output_size"]), Image.Resampling.LANCZOS)
+
+
+def sample_negative_window(gt, positive_window, image_size, rng):
+    """Translate the whole official crop, preserving every within-crop coordinate."""
+    W, H = image_size
+    px, py, x2, y2 = positive_window
+    cw, ch = x2 - px, y2 - py
+    candidates = ((rng.randint(0, W - cw), rng.randint(0, H - ch)) for _ in range(2000))
+    corners = itertools.product((0, W - cw), (0, H - ch))
+    for x, y in itertools.chain(candidates, corners):
+        negative = [gt[0] + x - px, gt[1] + y - py, gt[2] + x - px, gt[3] + y - py]
+        if iou(negative, gt) < NEG_IOU_LIMIT:
+            return [x, y, x + cw, y + ch], negative
+    raise ValueError("No geometry-preserving negative window satisfies IoU < 0.1")
+
+
 def _worker(i):
     h = _ROWS[i]
     try:
         data_dir = _DATA_DIR
-        src_student = os.path.join(data_dir, h["images"][0])
         src_tpos = os.path.join(data_dir, h["teacher_images"][0])
-        orig = Image.open(os.path.join(data_dir, h["original_images"][0])).convert("RGB")
-        W, H = orig.size
+        with Image.open(os.path.join(data_dir, h["original_images"][0])) as image:
+            original = image.convert("RGB")
+        with Image.open(src_tpos) as image:
+            official = image.convert("RGB")
         gt = h["bbox"]
-        bw, bh = gt[2] - gt[0], gt[3] - gt[1]
-        dx, dy = max(int(bw * PAD_RATIO), 16), max(int(bh * PAD_RATIO), 16)
-
-        drawn_np = np.array(Image.open(src_student).convert("RGB"))
-        ex = measure_expand(drawn_np, gt)
-        if ex is None:
-            return {"idx": i, "ok": False, "reason": "expand_measure_fail"}
-        el, et, er, eb = ex
-
-        rng = random.Random(9000 + i)
-        neg = None
-        if W - bw - 2 * dx >= 0 and H - bh - 2 * dy >= 0:
-            for _ in range(2000):
-                nx, ny = rng.randint(dx, W - bw - dx), rng.randint(dy, H - bh - dy)
-                c = (nx, ny, nx + bw, ny + bh)
-                if iou(c, gt) < NEG_IOU_LIMIT:
-                    neg = c
-                    break
-        if neg is None:
-            for _ in range(2000):
-                nx, ny = rng.randint(0, W - bw), rng.randint(0, H - bh)
-                c = (nx, ny, nx + bw, ny + bh)
-                if iou(c, gt) < NEG_IOU_LIMIT:
-                    neg = c
-                    break
-        if neg is None:
-            return {"idx": i, "ok": False, "reason": "no_neg"}
-
-        orig_np = np.array(orig)
-        nx1, ny1, nx2, ny2 = neg
-        drawn_neg_np = orig_np.copy()
-        cv2.rectangle(drawn_neg_np, (nx1 - el, ny1 - et), (nx2 + er, ny2 + eb), (255, 0, 0), THICK)
-        drawn_neg = Image.fromarray(drawn_neg_np)
-        official = Image.open(src_tpos).convert("RGB")
-        window = (max(0, nx1 - dx), max(0, ny1 - dy), min(W, nx2 + dx), min(H, ny2 + dy))
-        tneg = drawn_neg.crop(window).resize(official.size, Image.LANCZOS)
-
-        tneg.save(os.path.join(data_dir, "teacher_neg", f"{i:06d}.png"), compress_level=1)
-        return {"idx": i, "ok": True, "gt_bbox": [int(v) for v in gt], "neg_bbox": list(neg),
-                "iou": round(iou(neg, gt), 4), "crop_size": [int(v) for v in official.size]}
+        geometry = recover_geometry(original, official, gt)
+        positive_window = geometry["positive_crop_window"]
+        reconstructed = render_teacher(original, positive_window, geometry)
+        if not np.array_equal(np.asarray(reconstructed), np.asarray(official)):
+            raise ValueError("Official positive reconstruction is not pixel-exact")
+        negative_window, negative_bbox = sample_negative_window(
+            gt, positive_window, original.size, random.Random(9000 + i)
+        )
+        negative = render_teacher(original, negative_window, geometry)
+        path = os.path.join(data_dir, "teacher_neg", f"{i:06d}.png")
+        negative.save(path, compress_level=1)
+        frame = Image.new("L", tuple(geometry["source_crop_size"]), 0)
+        ImageDraw.Draw(frame).rectangle(geometry["frame_box_in_crop"], outline=255, width=FRAME_WIDTH)
+        frame = frame.resize(official.size, Image.Resampling.LANCZOS)
+        with open(src_tpos, "rb") as stream:
+            positive_sha256 = hashlib.sha256(stream.read()).hexdigest()
+        with open(path, "rb") as stream:
+            negative_sha256 = hashlib.sha256(stream.read()).hexdigest()
+        return {
+            "idx": i,
+            "ok": True,
+            "gt_bbox": list(gt),
+            "neg_bbox": negative_bbox,
+            "iou": iou(negative_bbox, gt),
+            "crop_size": list(official.size),
+            "negative_crop_window": negative_window,
+            "original_size": list(original.size),
+            "target_bbox_in_crop": [
+                gt[0] - positive_window[0],
+                gt[1] - positive_window[1],
+                gt[2] - positive_window[0],
+                gt[3] - positive_window[1],
+            ],
+            "positive_sha256": positive_sha256,
+            "negative_sha256": negative_sha256,
+            "shared_frame_mask_sha256": hashlib.sha256(frame.tobytes()).hexdigest(),
+            "generation_version": "2.0.0",
+            "resampling": "PIL.LANCZOS",
+            "renderer": "PIL.ImageDraw.rectangle",
+            **geometry,
+        }
     except Exception as e:
-        return {"idx": i, "ok": False, "reason": f"exc:{type(e).__name__}:{str(e)[:80]}"}
-
+        return {"idx": i, "ok": False, "reason": f"exc:{type(e).__name__}:{str(e)[:180]}"}
 
 def generate_negative_views(data_dir: str, nproc: int) -> list:
     with open(os.path.join(data_dir, "train.jsonl"), encoding="utf-8") as f:
@@ -198,6 +310,8 @@ def generate_negative_views(data_dir: str, nproc: int) -> list:
     success_rate = 100 * ok / len(results) if results else 0.0
     print(f"Negative views: {ok}/{len(results)} ({success_rate:.1f}%) "
           f"in {(time.time() - t0) / 60:.1f} min")
+    if ok != len(results):
+        raise RuntimeError("Negative generation incomplete; inspect results.json before using the dataset")
     return results
 
 

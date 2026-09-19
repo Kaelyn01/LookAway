@@ -60,6 +60,24 @@ class PrepareDataTests(unittest.TestCase):
         }
         self.assertEqual(module.build_record(item, "/data", None)["neg_bbox_images"], [])
 
+    def test_generation_failure_blocks_incomplete_dataset(self):
+        module = load_script(
+            "prepare_data_failure",
+            "scripts/prepare_data.py",
+            {"cv2": types.ModuleType("cv2"), "datasets": types.ModuleType("datasets")},
+        )
+
+        class FailedPool(FakePool):
+            def imap_unordered(self, func, indices, chunksize):
+                return iter({"idx": i, "ok": False, "reason": "geometry mismatch"} for i in indices)
+
+        module.Pool = FailedPool
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "train.jsonl").write_text('{"id": 1}' + chr(10), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "Negative generation incomplete"):
+                module.generate_negative_views(tmp, 1)
+            self.assertTrue((Path(tmp) / "results.json").exists())
+
 
 class PreparePriorsTests(unittest.TestCase):
     @classmethod
