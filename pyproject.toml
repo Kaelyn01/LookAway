@@ -16,18 +16,23 @@ name = "lookaway"
 dynamic = ["version"]
 
 description = "LookAway: Token-Level Counterfactual Voting for On-Policy Self-Distillation"
+authors = [{name = "Chen Tian"}]
 license = "Apache-2.0"
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.10"
 
 dependencies = []
 
+[project.urls]
+Repository = "https://github.com/Kaelyn01/LookAway"
+Dataset = "https://huggingface.co/datasets/haokaixinmeitiandouhaokaixin/crop-paired-visual-evidence"
+Paper = "https://arxiv.org/abs/2605.18740"
+
 # -------------------------------
 # tool.ruff - Linting configuration
 # -------------------------------
 [tool.ruff]
 line-length = 120
-exclude = ["scripts/legacy_model_merger.py"]
 
 [tool.ruff.lint]
 isort = {known-first-party = ["verl"]}

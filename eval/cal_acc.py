@@ -5,7 +5,10 @@ from collections import defaultdict
 
 
 def is_correct(item):
-    return str(item.get("judge", "")).strip().lower() == "yes"
+    judgment = str(item.get("judge", "")).strip()
+    if judgment.startswith("[JUDGE_ERROR]"):
+        raise RuntimeError(f"Judge output contains an error: {judgment}")
+    return judgment.lower() == "yes"
 
 
 def acc_text(correct, total):
@@ -14,7 +17,7 @@ def acc_text(correct, total):
 
 
 def calc_vstar(judge_json, benchmark):
-    with open(judge_json, "r", encoding="utf-8") as f:
+    with open(judge_json, encoding="utf-8") as f:
         data = json.load(f)
 
     category_stats = defaultdict(lambda: {"correct": 0, "total": 0})
@@ -37,9 +40,9 @@ def calc_vstar(judge_json, benchmark):
 
 
 def calc_hrbench(judge_json, benchmark, benchmark_json):
-    with open(judge_json, "r", encoding="utf-8") as f:
+    with open(judge_json, encoding="utf-8") as f:
         records = json.load(f)
-    with open(benchmark_json, "r", encoding="utf-8") as f:
+    with open(benchmark_json, encoding="utf-8") as f:
         benchmark_records = json.load(f)
 
     def image_key(item):
@@ -76,9 +79,9 @@ def calc_hrbench(judge_json, benchmark, benchmark_json):
 
 
 def calc_mme_realworld(judge_json, benchmark, benchmark_json):
-    with open(judge_json, "r", encoding="utf-8") as f:
+    with open(judge_json, encoding="utf-8") as f:
         records = json.load(f)
-    with open(benchmark_json, "r", encoding="utf-8") as f:
+    with open(benchmark_json, encoding="utf-8") as f:
         benchmark_records = json.load(f)
 
     def image_key(item):
@@ -150,7 +153,7 @@ def _pope_fmt(label, accuracy, precision, recall, f1, yes_ratio, total):
 
 
 def calc_pope(judge_json, benchmark):
-    with open(judge_json, "r", encoding="utf-8") as f:
+    with open(judge_json, encoding="utf-8") as f:
         data = json.load(f)
 
     a, p, r, f1, yr, n = _pope_metrics(data)
@@ -158,7 +161,7 @@ def calc_pope(judge_json, benchmark):
 
 
 def calc_cvbench(judge_json, benchmark):
-    with open(judge_json, "r", encoding="utf-8") as f:
+    with open(judge_json, encoding="utf-8") as f:
         data = json.load(f)
 
     type_stats = defaultdict(lambda: {"correct": 0, "total": 0})
@@ -176,7 +179,7 @@ def calc_cvbench(judge_json, benchmark):
 
 
 def calc_visualprobe(judge_json, benchmark):
-    with open(judge_json, "r", encoding="utf-8") as f:
+    with open(judge_json, encoding="utf-8") as f:
         data = json.load(f)
 
     cat_stats = defaultdict(lambda: {"correct": 0, "total": 0})
@@ -198,7 +201,7 @@ def calc_visualprobe(judge_json, benchmark):
 
 
 def calc_generic(judge_json, benchmark):
-    with open(judge_json, "r", encoding="utf-8") as f:
+    with open(judge_json, encoding="utf-8") as f:
         data = json.load(f)
     n = len(data)
     c = sum(1 for x in data if is_correct(x))

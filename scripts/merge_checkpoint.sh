@@ -3,6 +3,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PYTHON="${PYTHON:-python3}"
 DEFAULT_BASE_DIR="${PROJECT_ROOT}/cache/lookaway/checkpoints/LookAway-Qwen3.5-4B/global_step_65/"
 BASE_DIR="${BASE_DIR:-${1:-${DEFAULT_BASE_DIR}}}"
 BASE_DIR="${BASE_DIR%/}"
@@ -45,7 +46,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-python3 -m verl.model_merger merge \
+"$PYTHON" -m verl.model_merger merge \
   --backend fsdp \
   --local_dir "${ACTOR_DIR}" \
   --target_dir "${STAGING_DIR}"

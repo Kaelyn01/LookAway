@@ -57,13 +57,17 @@ def should_retry_existing_record(item):
     return model_answer.startswith("[API_ERROR]") or model_answer.startswith("[FUTURE_ERROR]")
 
 
+def count_failed_records(records):
+    return sum(should_retry_existing_record(record) for record in records)
+
+
 def compact_existing_output(path, benchmark):
     if not path.exists():
         return [], {}, False
     ordered_uids = []
     best_records = {}
     changed = False
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -150,7 +154,7 @@ def main():
     parser.add_argument("--model_name", required=True, type=str)
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--api_base", required=True, type=str)
-    parser.add_argument("--api_key", default="EMPTY", type=str)
+    parser.add_argument("--api_key", default=None, type=str, help=argparse.SUPPRESS)
     parser.add_argument("--model_id", required=True, type=str, help="OpenAI model ID")
     parser.add_argument("--max_tokens", default=4096, type=int)
     parser.add_argument("--max_retries", default=3, type=int)
@@ -158,10 +162,11 @@ def main():
     parser.add_argument("--enable_thinking", type=str, default=None, choices=["True", "False"],
                         help="Set enable_thinking via chat_template_kwargs (True=on, False=off)")
     args = parser.parse_args()
+    api_key = args.api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
 
     benchmark = args.benchmark
     data_path = Path(args.benchmark_json)
-    with open(data_path, "r", encoding="utf-8") as f:
+    with open(data_path, encoding="utf-8") as f:
         total_data = json.load(f)
 
     out_dir = Path(args.out_dir) / benchmark
@@ -204,7 +209,7 @@ def main():
     def get_client():
         c = getattr(thread_local, "client", None)
         if c is None:
-            c = OpenAI(api_key=args.api_key, base_url=args.api_base, timeout=3600)
+            c = OpenAI(api_key=api_key, base_url=args.api_base, timeout=3600)
             thread_local.client = c
         return c
 
@@ -279,6 +284,9 @@ def main():
     print(f"Compacted final output to {len(final_records)} unique samples.")
     print(f"Inference done in {elapsed:.1f}s")
     print(f"Saved answers to: {out_path}")
+    failed = count_failed_records(final_records.values())
+    if failed:
+        raise RuntimeError(f"Inference failed for {failed} samples; rerun the same command to retry them")
 
 
 if __name__ == "__main__":

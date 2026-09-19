@@ -26,12 +26,15 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import itertools
 import json
 import os
 import random
-import subprocess
+import shutil
 import sys
+import tarfile
+import tempfile
 import time
 from multiprocessing import Pool
 from typing import Any
@@ -41,29 +44,111 @@ import datasets
 import numpy as np
 from PIL import Image, ImageDraw
 
-FRAME_WIDTH = 5     # verified against every official teacher image
+FRAME_WIDTH = 5  # verified against every official teacher image
 NEG_IOU_LIMIT = 0.1
+DEFAULT_HF_REPO = "yuanqianhao/Vision-OPD-6K"
+DEFAULT_HF_REVISION = "eb5c1c2e7b9a7b6a619efe4161c7369c71bf8af4"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare LookAway training data.")
     parser.add_argument("--data-dir", default="./cache/lookaway", help="Output directory")
-    parser.add_argument("--hf-repo", default="yuanqianhao/Vision-OPD-6K", help="HuggingFace dataset repo")
+    parser.add_argument("--hf-repo", default=DEFAULT_HF_REPO, help="Hugging Face dataset repository")
+    parser.add_argument(
+        "--hf-revision",
+        default=None,
+        help="Pinned Hugging Face dataset revision (required for non-default repositories)",
+    )
     parser.add_argument("--skip-download", action="store_true", help="Skip downloading, only preprocess")
     parser.add_argument("--nproc", type=int, default=16, help="Worker processes for negative-view generation")
     return parser.parse_args()
 
 
 # ---------------------------------------------------------------- download --
-def download_dataset(repo_id: str, data_dir: str) -> None:
-    print(f"Downloading dataset from {repo_id} ...")
+class ConcatenatedReader(io.RawIOBase):
+    """Read split archive parts as one forward-only byte stream."""
+
+    def __init__(self, paths):
+        self.paths = iter(paths)
+        self.current = None
+
+    def readable(self):
+        return True
+
+    def read(self, size=-1):
+        chunks = []
+        remaining = size
+        while remaining != 0:
+            if self.current is None:
+                try:
+                    self.current = open(next(self.paths), "rb")
+                except StopIteration:
+                    break
+            chunk = self.current.read(remaining)
+            if chunk:
+                chunks.append(chunk)
+                if remaining > 0:
+                    remaining -= len(chunk)
+            else:
+                self.current.close()
+                self.current = None
+        return b"".join(chunks)
+
+    def close(self):
+        if self.current is not None:
+            self.current.close()
+        super().close()
+
+
+def extract_tar_parts(parts, destination):
+    """Extract regular files/directories while rejecting links and traversal."""
+    destination = os.path.realpath(destination)
+    with ConcatenatedReader(parts) as stream, tarfile.open(fileobj=stream, mode="r|gz") as archive:
+        for member in archive:
+            target = os.path.realpath(os.path.join(destination, member.name))
+            if os.path.commonpath([destination, target]) != destination:
+                raise ValueError(f"Unsafe archive path: {member.name}")
+            if member.isdir():
+                os.makedirs(target, exist_ok=True)
+                continue
+            if not member.isfile():
+                raise ValueError(f"Unsupported archive entry: {member.name}")
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            source = archive.extractfile(member)
+            if source is None:
+                raise ValueError(f"Unable to read archive entry: {member.name}")
+            with source, open(target, "wb") as output:
+                shutil.copyfileobj(source, output)
+
+
+def safe_dataset_path(data_dir: str, relative_path: str) -> str:
+    root = os.path.realpath(data_dir)
+    target = os.path.realpath(os.path.join(root, relative_path))
+    if os.path.commonpath([root, target]) != root:
+        raise ValueError(f"Unsafe dataset path: {relative_path}")
+    return target
+
+
+def resolve_dataset_revision(repo_id: str, revision: str | None) -> str:
+    if revision:
+        return revision
+    if repo_id == DEFAULT_HF_REPO:
+        return DEFAULT_HF_REVISION
+    raise ValueError("--hf-revision is required for a non-default dataset repository")
+
+
+def download_dataset(repo_id: str, revision: str, data_dir: str) -> None:
+    print(f"Downloading dataset from {repo_id}@{revision} ...")
     from huggingface_hub import snapshot_download
-    snapshot_download(repo_id, repo_type="dataset", local_dir=data_dir)
+
+    snapshot_download(repo_id, repo_type="dataset", revision=revision, local_dir=data_dir)
 
     # Extract every shipped image bundle (multi-part tars are cat-joined).
-    for sub, prefix in (("images", "images.tar.gz"),
-                        ("teacher_images", "teacher_images.tar.gz"),
-                        ("original_images", "original_images.tar.gz")):
+    for sub, prefix in (
+        ("images", "images.tar.gz"),
+        ("teacher_images", "teacher_images.tar.gz"),
+        ("original_images", "original_images.tar.gz"),
+    ):
         d = os.path.join(data_dir, sub)
         if not os.path.isdir(d):
             print(f"Warning: {d} not present in the download", file=sys.stderr)
@@ -72,15 +157,7 @@ def download_dataset(repo_id: str, data_dir: str) -> None:
         if not tars:
             continue
         print(f"Extracting {sub} ...")
-        cat_process = subprocess.Popen(["cat", *tars], cwd=d, stdout=subprocess.PIPE)
-        try:
-            subprocess.run(["tar", "-xf", "-", "-C", "."], cwd=d, stdin=cat_process.stdout, check=True)
-        finally:
-            if cat_process.stdout is not None:
-                cat_process.stdout.close()
-            cat_returncode = cat_process.wait()
-        if cat_returncode != 0:
-            raise subprocess.CalledProcessError(cat_process.returncode, cat_process.args)
+        extract_tar_parts([os.path.join(d, name) for name in tars], d)
         for f in tars:
             os.remove(os.path.join(d, f))
 
@@ -205,13 +282,15 @@ def recover_difficult(original, official, gt):
 
 _ROWS = None
 _DATA_DIR = None
+_NEG_OUTPUT_DIR = None
 
 
-def _init_worker(rows, data_dir):
+def _init_worker(rows, data_dir, neg_output_dir=None):
     """Pool initializer: safe under both fork and spawn start methods."""
-    global _ROWS, _DATA_DIR
+    global _ROWS, _DATA_DIR, _NEG_OUTPUT_DIR
     _ROWS = rows
     _DATA_DIR = data_dir
+    _NEG_OUTPUT_DIR = neg_output_dir or os.path.join(data_dir, "teacher_neg")
 
 
 def render_teacher(original, window, geometry):
@@ -240,8 +319,8 @@ def _worker(i):
     h = _ROWS[i]
     try:
         data_dir = _DATA_DIR
-        src_tpos = os.path.join(data_dir, h["teacher_images"][0])
-        with Image.open(os.path.join(data_dir, h["original_images"][0])) as image:
+        src_tpos = safe_dataset_path(data_dir, h["teacher_images"][0])
+        with Image.open(safe_dataset_path(data_dir, h["original_images"][0])) as image:
             original = image.convert("RGB")
         with Image.open(src_tpos) as image:
             official = image.convert("RGB")
@@ -255,7 +334,7 @@ def _worker(i):
             gt, positive_window, original.size, random.Random(9000 + i)
         )
         negative = render_teacher(original, negative_window, geometry)
-        path = os.path.join(data_dir, "teacher_neg", f"{i:06d}.png")
+        path = os.path.join(_NEG_OUTPUT_DIR, f"{i:06d}.png")
         negative.save(path, compress_level=1)
         frame = Image.new("L", tuple(geometry["source_crop_size"]), 0)
         ImageDraw.Draw(frame).rectangle(geometry["frame_box_in_crop"], outline=255, width=FRAME_WIDTH)
@@ -290,36 +369,91 @@ def _worker(i):
     except Exception as e:
         return {"idx": i, "ok": False, "reason": f"exc:{type(e).__name__}:{str(e)[:180]}"}
 
+
 def generate_negative_views(data_dir: str, nproc: int) -> list:
     with open(os.path.join(data_dir, "train.jsonl"), encoding="utf-8") as f:
         rows = [json.loads(line) for line in f]
-    os.makedirs(os.path.join(data_dir, "teacher_neg"), exist_ok=True)
-
+    if not rows:
+        raise ValueError("train.jsonl is empty")
+    target_dir = os.path.join(data_dir, "teacher_neg")
+    staging_dir = tempfile.mkdtemp(prefix=".teacher_neg.", dir=data_dir)
     t0 = time.time()
     results = []
-    with Pool(nproc, initializer=_init_worker, initargs=(rows, data_dir)) as pool:
-        for n, r in enumerate(pool.imap_unordered(_worker, range(len(rows)), chunksize=16), 1):
-            results.append(r)
-            if n % 500 == 0:
-                ok = sum(1 for x in results if x.get("ok"))
-                print(f"[{n}/{len(rows)}] ok={ok} elapsed={time.time() - t0:.0f}s", flush=True)
-    results.sort(key=lambda r: r["idx"])
-    with open(os.path.join(data_dir, "results.json"), "w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=1)
-    ok = sum(1 for r in results if r.get("ok"))
-    success_rate = 100 * ok / len(results) if results else 0.0
-    print(f"Negative views: {ok}/{len(results)} ({success_rate:.1f}%) "
-          f"in {(time.time() - t0) / 60:.1f} min")
-    if ok != len(results):
-        raise RuntimeError("Negative generation incomplete; inspect results.json before using the dataset")
-    return results
+    try:
+        with Pool(nproc, initializer=_init_worker, initargs=(rows, data_dir, staging_dir)) as pool:
+            for n, r in enumerate(pool.imap_unordered(_worker, range(len(rows)), chunksize=16), 1):
+                results.append(r)
+                if n % 500 == 0:
+                    ok = sum(1 for x in results if x.get("ok"))
+                    print(f"[{n}/{len(rows)}] ok={ok} elapsed={time.time() - t0:.0f}s", flush=True)
+        results.sort(key=lambda r: r["idx"])
+        ok = sum(1 for r in results if r.get("ok"))
+        success_rate = 100 * ok / len(results) if results else 0.0
+        print(f"Negative views: {ok}/{len(results)} ({success_rate:.1f}%) in {(time.time() - t0) / 60:.1f} min")
+        if ok != len(results) or [r.get("idx") for r in results] != list(range(len(rows))):
+            write_json_atomic(os.path.join(data_dir, "results.failed.json"), results)
+            raise RuntimeError("Negative generation incomplete; inspect results.failed.json before retrying")
+        expected_files = {f"{i:06d}.png" for i in range(len(rows))}
+        actual_files = {entry.name for entry in os.scandir(staging_dir) if entry.is_file()}
+        if actual_files != expected_files:
+            missing = sorted(expected_files - actual_files)[:5]
+            extra = sorted(actual_files - expected_files)[:5]
+            write_json_atomic(os.path.join(data_dir, "results.failed.json"), results)
+            raise RuntimeError(f"Negative image set is incomplete: missing={missing}, extra={extra}")
+        invalidate_training_artifacts(data_dir)
+        publish_negative_views(staging_dir, target_dir)
+        staging_dir = None
+        write_json_atomic(os.path.join(data_dir, "results.json"), results)
+        failed_results = os.path.join(data_dir, "results.failed.json")
+        if os.path.exists(failed_results):
+            os.remove(failed_results)
+        return results
+    finally:
+        if staging_dir is not None:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+def write_json_atomic(path: str, value) -> None:
+    temp_path = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, ensure_ascii=False, indent=1)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+def publish_negative_views(staging_dir: str, target_dir: str) -> None:
+    backup_dir = None
+    if os.path.exists(target_dir):
+        backup_dir = tempfile.mkdtemp(prefix=".teacher_neg.backup.", dir=os.path.dirname(target_dir))
+        os.rmdir(backup_dir)
+        os.replace(target_dir, backup_dir)
+    try:
+        os.replace(staging_dir, target_dir)
+    except Exception:
+        if backup_dir is not None:
+            os.replace(backup_dir, target_dir)
+        raise
+    if backup_dir is not None:
+        shutil.rmtree(backup_dir)
+
+
+def invalidate_training_artifacts(data_dir: str) -> None:
+    """Keep stale artifacts recoverable but impossible to launch accidentally."""
+    for name in ("train.parquet", "token_priors.json", "results.json"):
+        path = os.path.join(data_dir, name)
+        if os.path.exists(path):
+            os.replace(path, f"{path}.stale")
 
 
 # ---------------------------------------------------------------- parquet --
 def clean_question(problem: str) -> str:
     text = (problem or "").replace("<image>", "").strip()
-    hint = ("Only focus on the objects inside the red bounding box in the image "
-            "to answer this question.")
+    hint = "Only focus on the objects inside the red bounding box in the image to answer this question."
     text = text.replace(f"\n\n{hint}", "").replace(hint, "")
     return text.strip()
 
@@ -328,8 +462,8 @@ def build_record(item: dict[str, Any], data_dir: str, neg_path: str | None) -> d
     record = {
         "data_source": "zwz_rl_vqa_bbox_teacher",
         "prompt": [{"role": "user", "content": item["problem"]}],
-        "images": [{"path": os.path.join(data_dir, item["images"][0])}],
-        "bbox_images": [{"path": os.path.join(data_dir, item["teacher_images"][0])}],
+        "images": [{"path": safe_dataset_path(data_dir, item["images"][0])}],
+        "bbox_images": [{"path": safe_dataset_path(data_dir, item["teacher_images"][0])}],
         "ability": "visual_question_answering",
         "reward_model": {"style": "none", "ground_truth": item.get("answer", "")},
         "extra_info": {
@@ -342,25 +476,39 @@ def build_record(item: dict[str, Any], data_dir: str, neg_path: str | None) -> d
     return record
 
 
+def count_negative_views(records: list[dict[str, Any]]) -> int:
+    return sum(bool(record["neg_bbox_images"]) for record in records)
+
+
 def convert_to_parquet(data_dir: str, results: list) -> None:
     jsonl_path = os.path.join(data_dir, "train.jsonl")
     if not os.path.exists(jsonl_path):
         print(f"Error: {jsonl_path} not found", file=sys.stderr)
         sys.exit(1)
 
-    by_idx_ok = {r["idx"]: r.get("ok", False) for r in results}
+    with open(jsonl_path, encoding="utf-8") as stream:
+        source_rows = [line for line in stream if line.strip()]
+    expected_ids = list(range(len(source_rows)))
+    if [r.get("idx") for r in results] != expected_ids or not all(r.get("ok") for r in results):
+        raise ValueError("Refusing to build train.parquet from incomplete negative-view results")
+    by_idx_ok = {r["idx"]: True for r in results}
     print("Converting train.jsonl to train.parquet ...")
     records = []
-    with open(jsonl_path, encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            item = json.loads(line)
-            neg = os.path.join(data_dir, "teacher_neg", f"{i:06d}.png") if by_idx_ok.get(i) else None
-            records.append(build_record(item, data_dir, neg))
+    for i, line in enumerate(source_rows):
+        item = json.loads(line)
+        neg = os.path.join(data_dir, "teacher_neg", f"{i:06d}.png") if by_idx_ok.get(i) else None
+        records.append(build_record(item, data_dir, neg))
 
     dataset = datasets.Dataset.from_list(records)
     output_path = os.path.join(data_dir, "train.parquet")
-    dataset.to_parquet(output_path)
-    n_neg = sum(1 for r in records if "neg_bbox_images" in r)
+    temp_path = f"{output_path}.tmp.{os.getpid()}"
+    try:
+        dataset.to_parquet(temp_path)
+        os.replace(temp_path, output_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+    n_neg = count_negative_views(records)
     print(f"Saved {len(records)} records ({n_neg} with negative views) to {output_path}")
 
 
@@ -370,7 +518,7 @@ def main() -> None:
     os.makedirs(data_dir, exist_ok=True)
 
     if not args.skip_download:
-        download_dataset(args.hf_repo, data_dir)
+        download_dataset(args.hf_repo, resolve_dataset_revision(args.hf_repo, args.hf_revision), data_dir)
 
     results = generate_negative_views(data_dir, args.nproc)
     convert_to_parquet(data_dir, results)

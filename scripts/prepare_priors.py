@@ -3,7 +3,9 @@
 
 Usage:
     python scripts/prepare_priors.py --data-dir ./cache/lookaway \
-        --model-path Qwen/Qwen3.5-4B [--device cuda:0] [--limit N]
+        --model-path Qwen/Qwen3.5-4B \
+        --model-revision 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a \
+        [--device cuda:0] [--limit N]
 
 Stage 1 - three-view token dump: the base model greedily answers every
 training question from the student view (red-box full image); the same answer
@@ -21,7 +23,9 @@ Stage 2 - priors derived from the dump (token-id keyed):
 
 Output: {data_dir}/token_priors.json  (keys: rate / tmpl / meta)
 """
+
 import argparse
+import hashlib
 import json
 import os
 from collections import defaultdict
@@ -31,10 +35,12 @@ import torch
 from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
 
-ALPHA, BASE = 50.0, 0.10   # empirical-Bayes pseudo-counts
+ALPHA, BASE = 50.0, 0.10  # empirical-Bayes pseudo-counts
 BATCH = 16
 TMPL_DF_CUT = 0.25
 MAX_NEW_TOKENS = 96
+DEFAULT_MODEL_REVISION = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+DEFAULT_MODEL_PATH = "Qwen/Qwen3.5-4B"
 DEFAULT_CHAT_TEMPLATE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "chat_templates",
@@ -45,10 +51,14 @@ DEFAULT_CHAT_TEMPLATE = os.path.join(
 def parse_args():
     ap = argparse.ArgumentParser(description="Build frozen LookAway token priors.")
     ap.add_argument("--data-dir", default="./cache/lookaway")
-    ap.add_argument("--model-path", default="Qwen/Qwen3.5-4B")
+    ap.add_argument("--model-path", default=DEFAULT_MODEL_PATH)
+    ap.add_argument(
+        "--model-revision",
+        default=None,
+        help="Pinned Hugging Face model revision (required for non-default remote models)",
+    )
     ap.add_argument("--device", default="cuda:0")
-    ap.add_argument("--limit", type=int, default=0,
-                    help=">0: use only the first N samples (smoke test)")
+    ap.add_argument("--limit", type=int, default=0, help=">0: use only the first N samples (smoke test)")
     ap.add_argument(
         "--chat-template",
         default=DEFAULT_CHAT_TEMPLATE,
@@ -64,6 +74,24 @@ def generated_answer_ids(generated_ids, tokenizer):
     while token_ids and int(token_ids[-1]) in special_ids:
         token_ids.pop()
     return [int(token_id) for token_id in token_ids]
+
+
+def file_sha256(path):
+    value = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            value.update(block)
+    return value.hexdigest()
+
+
+def tokenizer_fingerprint(tokenizer):
+    """Hash the token-ID mapping and special tokens used by token-keyed priors."""
+    payload = {
+        "vocab": sorted((str(token), int(token_id)) for token, token_id in tokenizer.get_vocab().items()),
+        "special_tokens_map": {key: str(value) for key, value in sorted(tokenizer.special_tokens_map.items())},
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def find_answer_start(input_ids, answer_ids, search_window=16):
@@ -87,9 +115,7 @@ def build_inputs(proc, img_path, question, answer_ids=None, device="cuda", chat_
     if chat_template is not None:
         with open(chat_template, encoding="utf-8") as f:
             kwargs["chat_template"] = f.read()
-    text = proc.apply_chat_template(
-        msgs, tokenize=False, add_generation_prompt=True, enable_thinking=False, **kwargs
-    )
+    text = proc.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True, enable_thinking=False, **kwargs)
     img = Image.open(img_path).convert("RGB")
     inputs = proc(text=[text], images=[img], return_tensors="pt").to(device)
     if answer_ids is not None:
@@ -107,32 +133,29 @@ def build_inputs(proc, img_path, question, answer_ids=None, device="cuda", chat_
 
 
 def run_dump(args, tok, proc, model):
-    """Stage 1: three-view greedy scoring dump (rows with a failed negative
-    view in prepare_data.py are skipped)."""
+    """Stage 1: three-view greedy scoring dump from a complete aligned dataset."""
     out_path = os.path.join(args.data_dir, "token_scores_full.jsonl")
     with open(os.path.join(args.data_dir, "train.jsonl"), encoding="utf-8") as f:
-        rows = [json.loads(line) for line in f]
-    if args.limit > 0:
-        rows = rows[:args.limit]
+        all_rows = [json.loads(line) for line in f]
 
     results_path = os.path.join(args.data_dir, "results.json")
-    if os.path.exists(results_path):
-        with open(results_path, encoding="utf-8") as f:
-            ok = {record["idx"] for record in json.load(f) if record.get("ok")}
-    else:
-        ok = set(range(len(rows)))
-    skipped = [i for i in range(len(rows)) if i not in ok]
-    total = len(rows) - len(skipped)
-    if skipped:
-        print(f"Skipping {len(skipped)} rows without a negative view "
-              f"(first few: {skipped[:5]}); their priors contribution is dropped.")
+    if not os.path.exists(results_path):
+        raise FileNotFoundError("results.json is required; run scripts/prepare_data.py first")
+    with open(results_path, encoding="utf-8") as f:
+        generation_results = json.load(f)
+    expected_ids = list(range(len(all_rows)))
+    actual_ids = [record.get("idx") for record in generation_results]
+    if actual_ids != expected_ids or not all(
+        record.get("ok") and record.get("generation_version") == "2.0.0" for record in generation_results
+    ):
+        raise ValueError("results.json is incomplete or was not generated by the aligned v2 pipeline")
+    rows = all_rows[: args.limit] if args.limit > 0 else all_rows
+    total = len(rows)
 
     tpl = args.chat_template
     n_written = 0
     with open(out_path, "w", encoding="utf-8") as fout:
         for i, h in enumerate(rows):
-            if i not in ok:
-                continue
             q = h["problem"]
 
             # 1) greedy student rollout
@@ -226,7 +249,7 @@ def run_priors(args, dump_path, tok):
 
     sel, occ = defaultdict(int), defaultdict(int)
     for b in range(0, N, BATCH):
-        ch = recs[b:b + BATCH]
+        ch = recs[b : b + BATCH]
         dd = np.array([t[1] for ts in ch for t in ts])
         eps = np.array([t[2] for ts in ch for t in ts])
         s = dd / (dd + max(np.percentile(dd, 90), 0.25)) * eps / (eps + max(np.percentile(eps, 90), 0.25))
@@ -266,7 +289,14 @@ def run_priors(args, dump_path, tok):
     meta = {
         "n_samples": N,
         "model_path": args.model_path,
+        "model_revision": args.model_revision or None,
+        "tokenizer_name_or_path": getattr(tok, "name_or_path", None),
+        "tokenizer_vocab_size": getattr(tok, "vocab_size", None),
+        "tokenizer_sha256": tokenizer_fingerprint(tok),
         "chat_template": os.path.abspath(args.chat_template) if args.chat_template else None,
+        "chat_template_sha256": file_sha256(args.chat_template) if args.chat_template else None,
+        "generation_results_sha256": file_sha256(os.path.join(args.data_dir, "results.json")),
+        "train_parquet_sha256": file_sha256(os.path.join(args.data_dir, "train.parquet")),
         "alpha": ALPHA,
         "base": BASE,
         "tmpl_df_cut": TMPL_DF_CUT,
@@ -276,18 +306,40 @@ def run_priors(args, dump_path, tok):
         "id_miss": miss,
     }
     out = os.path.join(args.data_dir, "token_priors.json")
-    json.dump({"rate": rate_ids, "tmpl": tmpl_ids, "meta": meta}, open(out, "w"))
+    temp_path = f"{out}.tmp.{os.getpid()}"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as stream:
+            json.dump({"rate": rate_ids, "tmpl": tmpl_ids, "meta": meta}, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, out)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
     print(f"Priors written: {out}")
     print("meta:", meta)
 
 
 def main():
     args = parse_args()
-    tok = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
-    proc = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True)
+    if os.path.exists(args.model_path):
+        revision = None
+    elif args.model_revision:
+        revision = args.model_revision
+    elif args.model_path == DEFAULT_MODEL_PATH:
+        revision = DEFAULT_MODEL_REVISION
+    else:
+        raise ValueError("--model-revision is required for a non-default remote model")
+    args.model_revision = revision
+    tok = AutoTokenizer.from_pretrained(args.model_path, revision=revision, trust_remote_code=True)
+    proc = AutoProcessor.from_pretrained(args.model_path, revision=revision, trust_remote_code=True)
     model = AutoModelForImageTextToText.from_pretrained(
-        args.model_path, torch_dtype=torch.bfloat16, device_map=args.device,
-        trust_remote_code=True)
+        args.model_path,
+        revision=revision,
+        torch_dtype=torch.bfloat16,
+        device_map=args.device,
+        trust_remote_code=True,
+    )
     model.eval()
 
     dump_path = run_dump(args, tok, proc, model)

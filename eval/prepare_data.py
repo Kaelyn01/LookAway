@@ -4,9 +4,24 @@ import json
 import sys
 from pathlib import Path
 
+from huggingface_hub import snapshot_download
 from tqdm import tqdm
 
-from huggingface_hub import snapshot_download
+DATASET_REVISIONS = {
+    "inclusionAI/ZoomBench": "b788097e57d30510c6877824833234a73bf80d25",
+    "lmms-lab/vstar-bench": "b44023b4dca749ed8a76b85eb576627d05a1c174",
+    "DreamMr/HR-Bench": "83b9013d6293b85dc507e87199ca52517536939c",
+    "yifanzhang114/MME-RealWorld-Lmms-eval": "f157390129e8d2b60757eb68d340aade9446b52b",
+    "yifanzhang114/MME-RealWorld-CN-Lmms-eval": "37ac6f4e57ef211b37d1ee04a8f1268f1411b3e0",
+    "yifanzhang114/MME-RealWorld-lite-lmms-eval": "f6b0dc81ba4d3c39bd9b4e544578198d365ac084",
+    "Lin-Chen/MMStar": "bc98d668301da7b14f648724866e57302778ab27",
+    "lmms-lab/POPE": "4db1276663dfa5eb8ad16a52d24c31a09e470896",
+    "nyu-visionx/CV-Bench": "bc284db50d036958861cb60cdd7b77612052ce0d",
+    "MMVP/MMVP": "37eafecab8a3940c50c2ade5b36de69dbc99a8cf",
+    "Mini-o3/VisualProbe_Easy": "0e665a57946d4473deb9975a13f8ddba973b8026",
+    "Mini-o3/VisualProbe_Medium": "25d5ff5bce48147be34fd2655617ab17dc55b3fa",
+    "Mini-o3/VisualProbe_Hard": "bbe9b7a6c41d49844f45e51916ec0a60d1f0e378",
+}
 
 BENCHMARK_JSON_MAP = {
     "zoombench": "zoombench.json",
@@ -27,6 +42,15 @@ BENCHMARK_JSON_MAP = {
 }
 
 
+def download_benchmark(repo_id, local_dir):
+    return snapshot_download(
+        repo_id,
+        repo_type="dataset",
+        revision=DATASET_REVISIONS[repo_id],
+        local_dir=str(local_dir),
+    )
+
+
 def resolve_benchmark_json(benchmark):
     if benchmark not in BENCHMARK_JSON_MAP:
         print(f"ERROR: Unsupported benchmark: {benchmark}", file=sys.stderr)
@@ -39,7 +63,7 @@ def prepare_zoombench(out_dir):
     import pyarrow.parquet as pq
 
     local_dir = out_dir / "ZoomBench_data"
-    snapshot_download("inclusionAI/ZoomBench", repo_type="dataset", local_dir=str(local_dir))
+    download_benchmark("inclusionAI/ZoomBench", local_dir)
 
     src = local_dir / "data" / "test.parquet"
     full_dir = out_dir / "ZoomBench_images"
@@ -85,7 +109,7 @@ def prepare_vstar(out_dir):
     import pyarrow.parquet as pq
 
     local_dir = out_dir / "vstar_data"
-    snapshot_download("lmms-lab/vstar-bench", repo_type="dataset", local_dir=str(local_dir))
+    download_benchmark("lmms-lab/vstar-bench", local_dir)
 
     src = local_dir / "data" / "test-00000-of-00001.parquet"
     img_dir = out_dir / "VStar_images"
@@ -128,7 +152,7 @@ def prepare_hrbench(out_dir, benchmark):
     import pyarrow.parquet as pq
 
     local_dir = out_dir / "HR-Bench_data"
-    snapshot_download("DreamMr/HR-Bench", repo_type="dataset", local_dir=str(local_dir))
+    download_benchmark("DreamMr/HR-Bench", local_dir)
 
     parquet_name = "hr_bench_4k.parquet" if benchmark == "hrbench-4k" else "hr_bench_8k.parquet"
     src = local_dir / parquet_name
@@ -170,7 +194,7 @@ def _load_mme_realworld_parquet(repo_id, out_dir, img_subdir):
     import pyarrow.dataset as ds
 
     local_dir = out_dir / repo_id.replace("/", "_")
-    snapshot_download(repo_id, repo_type="dataset", local_dir=str(local_dir))
+    download_benchmark(repo_id, local_dir)
 
     data_dir = local_dir / "data"
     img_dir = out_dir / img_subdir
@@ -230,7 +254,7 @@ def prepare_mmstar(out_dir):
     import pyarrow.parquet as pq
 
     local_dir = out_dir / "MMStar_data"
-    snapshot_download("Lin-Chen/MMStar", repo_type="dataset", local_dir=str(local_dir))
+    download_benchmark("Lin-Chen/MMStar", local_dir)
 
     src = local_dir / "mmstar.parquet"
     img_dir = out_dir / "MMStar_images"
@@ -269,7 +293,7 @@ def prepare_pope(out_dir, benchmark):
     from datasets import load_dataset
 
     local_dir = out_dir / "POPE_data"
-    snapshot_download("lmms-lab/POPE", repo_type="dataset", local_dir=str(local_dir))
+    download_benchmark("lmms-lab/POPE", local_dir)
 
     img_dir = out_dir / "POPE_images"
     img_dir.mkdir(parents=True, exist_ok=True)
@@ -316,7 +340,7 @@ def prepare_cvbench(out_dir):
     import pyarrow.parquet as pq
 
     local_dir = out_dir / "CVBench_data"
-    snapshot_download("nyu-visionx/CV-Bench", repo_type="dataset", local_dir=str(local_dir))
+    download_benchmark("nyu-visionx/CV-Bench", local_dir)
 
     data = []
     for dim, parquet_name, img_subdir in [
@@ -359,13 +383,13 @@ def prepare_mmvp(out_dir):
     import csv
 
     local_dir = out_dir / "MMVP_data"
-    snapshot_download("MMVP/MMVP", repo_type="dataset", local_dir=str(local_dir))
+    download_benchmark("MMVP/MMVP", local_dir)
 
     csv_path = local_dir / "Questions.csv"
     img_src_dir = local_dir / "MMVP Images"
 
     data = []
-    with open(csv_path, "r", encoding="utf-8") as f:
+    with open(csv_path, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             qid = int(row["Index"])
@@ -397,10 +421,10 @@ def prepare_visualprobe(out_dir):
     data = []
     for category, repo_id in repos:
         local_dir = out_dir / f"VisualProbe_{category}_data"
-        snapshot_download(repo_id, repo_type="dataset", local_dir=str(local_dir))
+        download_benchmark(repo_id, local_dir)
 
         val_path = local_dir / "val.json"
-        with open(val_path, "r", encoding="utf-8") as f:
+        with open(val_path, encoding="utf-8") as f:
             records = json.load(f)
 
         for record in tqdm(records, desc=f"Processing VisualProbe {category}", unit="img"):

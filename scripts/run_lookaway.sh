@@ -4,6 +4,7 @@
 # Usage:
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 \
 #   MODEL_PATH=Qwen/Qwen3.5-4B \
+#   MODEL_REVISION=851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a \
 #   DATA_DIR=./cache/lookaway \
 #   WORK_DIR=./cache/lookaway \
 #   bash scripts/run_lookaway.sh
@@ -19,20 +20,34 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 DATA_DIR="${DATA_DIR:-$PROJECT_ROOT/cache/lookaway}"
 WORK_DIR="${WORK_DIR:-$PROJECT_ROOT/cache/lookaway}"
-MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3.5-4B}"
+DEFAULT_MODEL_PATH="Qwen/Qwen3.5-4B"
+DEFAULT_MODEL_REVISION="851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+MODEL_PATH="${MODEL_PATH:-$DEFAULT_MODEL_PATH}"
+MODEL_REVISION="${MODEL_REVISION:-}"
+if [[ "$MODEL_PATH" == "$DEFAULT_MODEL_PATH" && -z "$MODEL_REVISION" ]]; then
+  MODEL_REVISION="$DEFAULT_MODEL_REVISION"
+fi
 MODEL_NAME="$(basename "$MODEL_PATH")"
 TRAIN_FILE="$DATA_DIR/train.parquet"
 PRIOR_FILE="$DATA_DIR/token_priors.json"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-LookAway-${MODEL_NAME}}"
 PROJECT_NAME="${PROJECT_NAME:-LookAway}"
-export EXPERIMENT_NAME PROJECT_NAME
+export EXPERIMENT_NAME PROJECT_NAME MODEL_PATH MODEL_REVISION
 
-for f in "$TRAIN_FILE" "$PRIOR_FILE"; do
+for f in "$TRAIN_FILE" "$PRIOR_FILE" "$DATA_DIR/results.json"; do
   if [ ! -f "$f" ]; then
     echo "Missing $f -- run scripts/prepare_data.py and scripts/prepare_priors.py first." >&2
     exit 1
   fi
 done
+
+"${PYTHON:-python3}" "$SCRIPT_DIR/validate_priors.py" \
+  --prior-file "$PRIOR_FILE" \
+  --model-path "$MODEL_PATH" \
+  --model-revision "$MODEL_REVISION" \
+  --chat-template "$PROJECT_ROOT/chat_templates/perception_chat_template_qwen35.jinja" \
+  --generation-results "$DATA_DIR/results.json" \
+  --train-file "$TRAIN_FILE"
 
 exec bash "$SCRIPT_DIR/run_vision_opd.sh" \
   data.train_files="[\"$TRAIN_FILE\"]" \

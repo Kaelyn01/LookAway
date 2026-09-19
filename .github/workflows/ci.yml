@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install lightweight test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy pillow opencv-python-headless tqdm huggingface_hub ruff==0.16.8
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Lint custom code
+        run: ruff check scripts eval tests verl/workers/actor/lookaway_utils.py
+      - name: Check integration code for undefined names
+        run: ruff check --select F verl/workers/actor/dp_actor.py verl/trainer/ppo/ray_trainer.py verl/workers/config/actor.py
+      - name: Check shell syntax
+        run: bash -n scripts/*.sh eval/*.sh
+      - name: Compile Python sources
+        run: python -m compileall -q scripts eval tests verl
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v

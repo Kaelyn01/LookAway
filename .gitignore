@@ -3,6 +3,10 @@ cache/
 data/
 dumps/
 results.json
+results.failed.json
+*.stale
+.teacher_neg.*/
+.teacher_neg.backup.*/
 token_priors.json
 token_scores_full.jsonl
 
@@ -36,4 +40,5 @@ dist/
 .idea/
 .vscode/
 .DS_Store
+deliverables/
 *.bak*

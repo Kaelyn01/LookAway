@@ -23,14 +23,12 @@ import json
 import logging
 import os
 import re
-import time
 import uuid
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
 from io import BytesIO
 from pprint import pprint
-from string import Template
 from typing import Any, Optional
 
 import numpy as np
@@ -71,7 +69,6 @@ from verl.utils.py_functional import rename_dict
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
-from verl.utils.torch_functional import postprocess_data
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
@@ -1241,7 +1238,7 @@ class RayPPOTrainer:
                 teacher_position_ids[i, :, : position_ids.shape[-1]] = position_ids.to(device)
 
         metrics = {
-            "self_distillation/votedistill/neg_image_fraction": float(np.mean(teacher_present_mask_list)),
+            "self_distillation/lookaway/neg_image_fraction": float(np.mean(teacher_present_mask_list)),
         }
         tensors = {
             "teacher_neg_input_ids": teacher_input_ids,

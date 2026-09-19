@@ -12,8 +12,17 @@ set -euo pipefail
 # CONFIGURATION
 # =============================================================================
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PYTHON="${PYTHON:-python3}"
 CONFIG_NAME="vopd"
-MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3.5-4B}"
+DEFAULT_MODEL_PATH="Qwen/Qwen3.5-4B"
+DEFAULT_MODEL_REVISION="851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+MODEL_PATH="${MODEL_PATH:-$DEFAULT_MODEL_PATH}"
+MODEL_REVISION="${MODEL_REVISION:-}"
+if [[ "$MODEL_PATH" == "$DEFAULT_MODEL_PATH" && -z "$MODEL_REVISION" ]]; then
+    MODEL_REVISION="$DEFAULT_MODEL_REVISION"
+fi
+MODEL_ID="$MODEL_PATH"
+MODEL_PATH="$("$PYTHON" "$PROJECT_ROOT/scripts/resolve_model.py" "$MODEL_PATH" --revision "$MODEL_REVISION")"
 TEACHER_MODEL_SOURCE="legacy"
 TEACHER_REGULARIZATION="ema"
 TEACHER_UPDATE_RATE=0.05
@@ -51,7 +60,7 @@ CUSTOM_CHAT_TEMPLATE_FILE="${PROJECT_ROOT}/chat_templates/perception_chat_templa
 DATA_DIR="${DATA_DIR:-${PROJECT_ROOT}/cache/lookaway}"
 TASK_TRAIN_FILE="${DATA_DIR}/train.parquet"
 
-MODEL_NAME=$(basename "$MODEL_PATH")
+MODEL_NAME=$(basename "$MODEL_ID")
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-Vision-OPD-${MODEL_NAME}}"
 PROJECT_NAME="${PROJECT_NAME:-Vision-OPD}"
 WORK_DIR="${WORK_DIR:-${PROJECT_ROOT}}"
@@ -85,7 +94,7 @@ echo "Teacher model source: $TEACHER_MODEL_SOURCE"
 echo "Teacher regularization: $TEACHER_REGULARIZATION"
 echo "Teacher update rate: $TEACHER_UPDATE_RATE"
 
-python3 -m verl.trainer.main_ppo --config-name "$CONFIG_NAME" \
+"$PYTHON" -m verl.trainer.main_ppo --config-name "$CONFIG_NAME" \
     data.train_files="[\"$TASK_TRAIN_FILE\"]" \
     data.val_files="[]" \
     data.filter_overlong_prompts=False \

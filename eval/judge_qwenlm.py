@@ -139,6 +139,7 @@ def judge_via_api(prompts, api_base, api_key, judge_model, judge_max_tokens, par
 
     def call_one(idx, prompt):
         client = get_client()
+        last_error = None
         for attempt in range(3):
             try:
                 resp = client.chat.completions.create(
@@ -148,10 +149,11 @@ def judge_via_api(prompts, api_base, api_key, judge_model, judge_max_tokens, par
                     max_tokens=judge_max_tokens,
                 )
                 return idx, (resp.choices[0].message.content or "").strip()
-            except Exception:
+            except Exception as exc:
+                last_error = type(exc).__name__
                 if attempt < 2:
                     time.sleep(1.0)
-        return idx, "No"
+        return idx, f"[JUDGE_ERROR] {last_error}"
 
     with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
         futures = [executor.submit(call_one, i, p) for i, p in enumerate(prompts)]
@@ -190,11 +192,12 @@ def main():
     parser.add_argument("--model", required=True, type=str)
     parser.add_argument("--judge_model_path", default=None, type=str, help="Local model path for vLLM-based judging")
     parser.add_argument("--api_base", default=None, type=str, help="OpenAI-compatible API base URL for judging")
-    parser.add_argument("--api_key", default="EMPTY", type=str)
+    parser.add_argument("--api_key", default=None, type=str, help=argparse.SUPPRESS)
     parser.add_argument("--judge_model", default=None, type=str, help="Model name for API-based judging")
     parser.add_argument("--judge_max_tokens", default=2048, type=int)
     parser.add_argument("--answer_dir", default="model_answer", type=str)
     args = parser.parse_args()
+    api_key = args.api_key or os.environ.get("JUDGE_API_KEY") or os.environ.get("OPENAI_API_KEY", "EMPTY")
 
     if not args.api_base and not args.judge_model_path:
         print(
@@ -212,7 +215,7 @@ def main():
     is_mmvp = args.benchmark in MMVP_BENCHMARKS
 
     data_list = []
-    with open(answer_path, "r", encoding="utf-8") as f:
+    with open(answer_path, encoding="utf-8") as f:
         for line in f:
             data_list.append(json.loads(line))
 
@@ -279,7 +282,7 @@ def main():
         if args.api_base:
             judge_model_name = args.judge_model or "default"
             results = judge_via_api(
-                prompt_lists, args.api_base, args.api_key, judge_model_name, args.judge_max_tokens
+                prompt_lists, args.api_base, api_key, judge_model_name, args.judge_max_tokens
             )
         else:
             results = judge_via_vllm(prompt_lists, args.judge_model_path, args.judge_max_tokens)
@@ -294,6 +297,9 @@ def main():
     with open(save_path, "w", encoding="utf-8") as out_file:
         json.dump(data_list, out_file, ensure_ascii=False, indent=4)
     print(f"Saved judge results to: {save_path}")
+    failed = [item for item in data_list if str(item.get("judge", "")).startswith("[JUDGE_ERROR]")]
+    if failed:
+        raise RuntimeError(f"LLM judge failed for {len(failed)} cases; results were saved for inspection and retry")
 
 
 if __name__ == "__main__":

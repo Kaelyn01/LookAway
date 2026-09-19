@@ -1113,8 +1113,9 @@ class DataParallelPPOActor(BasePPOActor):
                             vd_tau = self_distillation_cfg.get("vd_tau", 2.0)
                             if self_distillation_cfg.get("vd_dual_signal", False):
                                 # Dual-signal voting = teacher view-sensitivity x student error;
-                                # dynamic knees at batch p90 keep contrast alive as distributions drift.
-                                # Knees use only valid (loss-masked) tokens: pad positions carry
+                                # dynamic knees at the current micro-batch p90 keep contrast alive
+                                # as distributions drift. Knees use only valid (loss-masked) tokens:
+                                # pad positions carry
                                 # real next-token logits that would contaminate the quantiles.
                                 has_valid = valid_pos.any()
                                 if has_valid:
@@ -1172,16 +1173,16 @@ class DataParallelPPOActor(BasePPOActor):
                                 elig = (s_dd > theta_dd) & rate_ok & tmpl_ok & valid_pos
                                 # funnel pass-rates over valid tokens: dd gate -> word-rate gate
                                 # -> template gate (ext_fraction_pre_jsd) -> JSD gate (ext_fraction)
-                                micro_batch_metrics["self_distillation/votedistill/gate_dd_fraction"] = (
+                                micro_batch_metrics["self_distillation/lookaway/gate_dd_fraction"] = (
                                     ((s_dd > theta_dd) & valid_pos).float().sum() / valid_pos.float().sum().clamp(min=1.0)
                                 ).item()
-                                micro_batch_metrics["self_distillation/votedistill/gate_rate_fraction"] = (
+                                micro_batch_metrics["self_distillation/lookaway/gate_rate_fraction"] = (
                                     ((s_dd > theta_dd) & rate_ok & valid_pos).float().sum() / valid_pos.float().sum().clamp(min=1.0)
                                 ).item()
                                 if self_distillation_cfg.get("vd_jsd_gate", False):
                                     # lever A ("ammunition gate"): extrapolation force may only
                                     # land where the per-token student-teacher GJSD exceeds a
-                                    # batch quantile, so the lambda budget never multiplies a
+                                    # current micro-batch quantile, so the lambda budget never multiplies a
                                     # near-zero loss on tokens the student already reproduces.
                                     if student_topk_logps is None or teacher_topk_logps is None:
                                         raise ValueError("vd_jsd_gate requires top-k distillation.")
@@ -1200,13 +1201,13 @@ class DataParallelPPOActor(BasePPOActor):
                                         jsd_thr = jsd_tok[valid_pos].quantile(float(self_distillation_cfg.get("vd_jsd_q", 0.5)))
                                     else:
                                         jsd_thr = jsd_tok.new_tensor(0.0)
-                                    micro_batch_metrics["self_distillation/votedistill/ext_fraction_pre_jsd"] = (
+                                    micro_batch_metrics["self_distillation/lookaway/ext_fraction_pre_jsd"] = (
                                         (elig & valid_pos).float().sum() / valid_pos.float().sum().clamp(min=1.0)
                                     ).item()
                                     elig = elig & (jsd_tok > jsd_thr)
                                 ext = vd_lambda * (s_dd - theta_dd).clamp(min=0.0) * elig.to(s_dd.dtype)
                                 w_raw = w_raw + ext
-                                micro_batch_metrics["self_distillation/votedistill/ext_fraction"] = (
+                                micro_batch_metrics["self_distillation/lookaway/ext_fraction"] = (
                                     (elig & valid_pos).float().sum() / valid_pos.float().sum().clamp(min=1.0)
                                 ).item()
                             # Normalize only tokens that have a real negative view. Tokens from
@@ -1219,12 +1220,12 @@ class DataParallelPPOActor(BasePPOActor):
                                 w_flat = vd_weights.reshape(-1)[valid_flat].float()
                                 micro_batch_metrics.update(
                                     {
-                                        "self_distillation/votedistill/abs_delta_diff_mean": dd_flat.abs().mean().item(),
-                                        "self_distillation/votedistill/abs_delta_diff_p90": dd_flat.abs().quantile(0.9).item(),
-                                        "self_distillation/votedistill/strong_fraction": (dd_flat.abs() >= 1.5).float().mean().item(),
-                                        "self_distillation/votedistill/w_mean": w_flat.mean().item(),
-                                        "self_distillation/votedistill/w_p90": w_flat.quantile(0.9).item(),
-                                        "self_distillation/votedistill/coverage": vd_neg_view_mask.mean().item() if vd_neg_view_mask is not None else 1.0,
+                                        "self_distillation/lookaway/abs_delta_diff_mean": dd_flat.abs().mean().item(),
+                                        "self_distillation/lookaway/abs_delta_diff_p90": dd_flat.abs().quantile(0.9).item(),
+                                        "self_distillation/lookaway/strong_fraction": (dd_flat.abs() >= 1.5).float().mean().item(),
+                                        "self_distillation/lookaway/w_mean": w_flat.mean().item(),
+                                        "self_distillation/lookaway/w_p90": w_flat.quantile(0.9).item(),
+                                        "self_distillation/lookaway/coverage": vd_neg_view_mask.mean().item() if vd_neg_view_mask is not None else 1.0,
                                     }
                                 )
                         if self_distillation_cfg.get("log_prob_dump_dir", None):

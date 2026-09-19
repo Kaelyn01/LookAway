@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use LookAway, cite this software and the Vision-OPD paper listed below."
+title: "LookAway: Token-Level Counterfactual Voting for On-Policy Self-Distillation"
+type: software
+authors:
+  - family-names: Chen
+    given-names: Tian
+repository-code: "https://github.com/Kaelyn01/LookAway"
+license: Apache-2.0
+preferred-citation:
+  type: article
+  title: "Vision-OPD: Learning to See Fine-Grained Details for Multimodal LLMs via On-Policy Self-Distillation"
+  authors:
+    - family-names: Yuan
+      given-names: Qianhao
+    - family-names: Lou
+      given-names: Jie
+    - family-names: Yu
+      given-names: Xing
+    - family-names: Lin
+      given-names: Hongyu
+    - family-names: Sun
+      given-names: Le
+    - family-names: Han
+      given-names: Xianpei
+    - family-names: Lu
+      given-names: Yaojie
+  journal: "arXiv preprint arXiv:2605.18740"
+  year: 2026
