@@ -270,7 +270,10 @@ class PreparePriorsTests(unittest.TestCase):
                 self.module.run_priors(args, dump, object())
 
     def test_prior_dump_requires_aligned_generation_results(self):
-        args = types.SimpleNamespace(data_dir="", limit=0, chat_template=None, device="cpu")
+        args = types.SimpleNamespace(
+            data_dir="", limit=0, chat_template=None, device="cpu",
+            shard=0, num_shards=1, merge_shards=0,
+        )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             args.data_dir = tmp
