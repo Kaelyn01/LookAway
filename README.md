@@ -19,8 +19,9 @@
 LookAway asks a focused question: **which response tokens genuinely depend on seeing the correct fine-grained evidence?** It extends [Vision-OPD](https://arxiv.org/abs/2605.18740) with an aligned negative teacher view, compares positive and negative teacher scores on the same student trajectory, and converts that counterfactual signal into token-level distillation weights. The positive teacher remains the learning target; the negative view only controls where the objective spends its weight.
 
 <p align="center">
-  <img src="assets/lookaway-overview.svg" alt="LookAway method overview" width="100%">
+  <img src="assets/lookaway-method-overview.png" alt="LookAway method overview" width="100%">
 </p>
+<p align="center"><sub><em>Conceptual method illustration; displayed scores and token weights are illustrative rather than experimental results.</em></sub></p>
 
 ## At a glance
 
@@ -38,6 +39,10 @@ LookAway asks a focused question: **which response tokens genuinely depend on se
 ## Method
 
 For a response sampled from the full-image student, LookAway evaluates every answer token under two aligned teacher views:
+
+<p align="center">
+  <img src="assets/lookaway-visual-counterfactuals.png" alt="Full-image student and aligned positive and negative teacher views" width="100%">
+</p>
 
 - **Positive teacher:** the official Vision-OPD evidence crop.
 - **Negative teacher:** a same-format crop translated to a wrong region while preserving the canvas, crop size, frame, and resize pipeline.
@@ -195,7 +200,7 @@ LookAway/
 ├── eval/                   # benchmark preparation and evaluation
 ├── tests/                  # geometry, weighting, launch, data, and eval regressions
 ├── verl/                   # vendored Vision-OPD/verl runtime + LookAway integration
-├── assets/                 # editable repository figures
+├── assets/                 # repository figures and visual assets
 ├── CITATION.cff
 └── NOTICE
 ```
