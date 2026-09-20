@@ -42,17 +42,12 @@ for f in "$TRAIN_FILE" "$PRIOR_FILE" "$DATA_DIR/results.json"; do
   fi
 done
 
-"${PYTHON:-python3}" "$SCRIPT_DIR/validate_priors.py" \
-  --prior-file "$PRIOR_FILE" \
-  --model-path "$MODEL_PATH" \
-  --model-revision "$MODEL_REVISION" \
-  --chat-template "$PROJECT_ROOT/chat_templates/perception_chat_template_qwen35.jinja" \
-  --generation-results "$DATA_DIR/results.json" \
-  --train-file "$TRAIN_FILE"
-
 # Frequency decay (budget-matched extrapolation reallocation). Enabled by
 # default; disable with VD_FREQ_DECAY=false to train without reallocation.
+# When enabled the frequency table is validated (tokenizer + dump provenance)
+# together with the priors before training starts.
 FD_OVERRIDES=()
+FREQ_VALIDATE=()
 if [[ "${VD_FREQ_DECAY:-true}" == "true" ]]; then
   if [ ! -f "$FREQ_FILE" ]; then
     echo "Missing $FREQ_FILE -- run scripts/build_freq_table.py first (or set VD_FREQ_DECAY=false)." >&2
@@ -62,7 +57,17 @@ if [[ "${VD_FREQ_DECAY:-true}" == "true" ]]; then
     +actor_rollout_ref.actor.self_distillation.vd_freq_decay=true
     +actor_rollout_ref.actor.self_distillation.vd_freq_file="$FREQ_FILE"
   )
+  FREQ_VALIDATE=(--freq-file "$FREQ_FILE" --token-dump "$DATA_DIR/token_scores_full.jsonl")
 fi
+
+"${PYTHON:-python3}" "$SCRIPT_DIR/validate_priors.py" \
+  --prior-file "$PRIOR_FILE" \
+  --model-path "$MODEL_PATH" \
+  --model-revision "$MODEL_REVISION" \
+  --chat-template "$PROJECT_ROOT/chat_templates/perception_chat_template_qwen35.jinja" \
+  --generation-results "$DATA_DIR/results.json" \
+  --train-file "$TRAIN_FILE" \
+  ${FREQ_VALIDATE[@]+"${FREQ_VALIDATE[@]}"}
 
 exec bash "$SCRIPT_DIR/run_vision_opd.sh" \
   data.train_files="[\"$TRAIN_FILE\"]" \

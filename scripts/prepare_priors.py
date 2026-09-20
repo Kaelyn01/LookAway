@@ -345,6 +345,11 @@ def main():
     dump_path = run_dump(args, tok, proc, model)
     del model
     torch.cuda.empty_cache()
+    # The token dump just changed: any existing frequency table is now stale.
+    freq_path = os.path.join(args.data_dir, "token_freq.json")
+    if os.path.exists(freq_path):
+        os.replace(freq_path, freq_path + ".stale")
+        print(f"Marked stale (token dump changed): {freq_path} -> {freq_path}.stale")
     run_priors(args, dump_path, tok)
 
 

@@ -51,21 +51,29 @@ def load_freq_table(freq_file: str) -> torch.Tensor:
 
 
 def redistribute_by_freq(ext: torch.Tensor, freq_counts: torch.Tensor, response_ids: torch.Tensor,
-                         valid_mask: torch.Tensor, kappa: float = 50.0) -> "tuple[torch.Tensor, float]":
+                         valid_mask: torch.Tensor, kappa: float = 50.0) -> "tuple[torch.Tensor, float, torch.Tensor]":
     """Frequency decay: strictly reallocate the extrapolation budget.
 
     e'_t = E * e_t * a_t / sum_j e_j * a_j with a_t = 1/sqrt(n_t + kappa) over
     the normalization scope (valid_mask). The budget total E, the base weights,
-    and non-eligible positions are unchanged. kappa defaults to 50 to match the
-    empirical-Bayes pseudo-count used when building the token priors. Returns
-    (ext_new, budget_ratio) where budget_ratio == 1.0 means the total was
-    preserved exactly.
+    and non-eligible positions are unchanged -- including tiny positive budgets
+    (no clamping: the scale uses the true sums, computed in float32). A
+    zero-budget input returns all zeros (a_t > 0 wherever e_t > 0, so the
+    weighted sum cannot vanish while the total is positive). kappa defaults to
+    50 to match the empirical-Bayes pseudo-count used when building the token
+    priors. Returns (ext_new, budget_ratio, n_freq): budget_ratio == 1.0 means
+    the total was preserved exactly (1.0 is also returned for zero-budget
+    inputs, which are neutral by definition; callers distinguish them via
+    whether the total is zero); n_freq is the gathered per-position count so
+    callers need not gather it again.
     """
     n_freq = freq_counts.to(ext.device)[response_ids.long()]
     a_fd = torch.rsqrt(n_freq + kappa)
     e_w = ext * a_fd
-    e_total = ext[valid_mask].sum().clamp(min=1e-6)
-    e_weighted = e_w[valid_mask].sum().clamp(min=1e-6)
+    e_total = ext[valid_mask].float().sum().item()
+    if e_total <= 0.0:
+        return torch.zeros_like(ext), 1.0, n_freq
+    e_weighted = e_w[valid_mask].float().sum().item()
     ext_new = e_w * (e_total / e_weighted)
-    e_ratio = (ext_new[valid_mask].sum() / e_total).item()
-    return ext_new, e_ratio
+    budget_ratio = ext_new[valid_mask].float().sum().item() / e_total
+    return ext_new, budget_ratio, n_freq

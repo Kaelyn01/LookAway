@@ -48,6 +48,40 @@ class LauncherTests(unittest.TestCase):
             f"+actor_rollout_ref.actor.self_distillation.vd_freq_file={data_dir / 'token_freq.json'}", args
         )
 
+    def test_lookaway_launcher_disable_freq_decay_needs_no_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            data_dir = tmp_path / "data"
+            data_dir.mkdir()
+            (data_dir / "train.parquet").touch()
+            (data_dir / "token_priors.json").write_text("{}", encoding="utf-8")
+            (data_dir / "results.json").write_text("[]", encoding="utf-8")
+            # NOTE: no token_freq.json -- the disabled path must not require it.
+
+            fake_bin = tmp_path / "bin"
+            fake_bin.mkdir()
+            argv_path = tmp_path / "argv.txt"
+            fake_python = fake_bin / "python3"
+            fake_python.write_text('#!/bin/sh\nprintf \'%s\n\' "$@" > "$ARGV_PATH"\n', encoding="utf-8")
+            fake_python.chmod(0o755)
+
+            env = os.environ.copy()
+            env.update(
+                {
+                    "ARGV_PATH": str(argv_path),
+                    "DATA_DIR": str(data_dir),
+                    "WORK_DIR": str(tmp_path / "work"),
+                    "PATH": f"{fake_bin}:{env['PATH']}",
+                    "PYTHON": str(fake_python),
+                    "VD_FREQ_DECAY": "false",
+                }
+            )
+            subprocess.run(["bash", str(ROOT / "scripts/run_lookaway.sh")], env=env, check=True)
+            args = argv_path.read_text(encoding="utf-8").splitlines()
+
+        self.assertIn("+actor_rollout_ref.actor.self_distillation.vd_targeted=true", args)
+        self.assertFalse(any("vd_freq_decay" in arg or "vd_freq_file" in arg for arg in args))
+
     def test_non_default_remote_model_requires_revision(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = os.environ.copy()

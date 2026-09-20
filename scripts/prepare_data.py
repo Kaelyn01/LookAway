@@ -522,6 +522,12 @@ def main() -> None:
 
     results = generate_negative_views(data_dir, args.nproc)
     convert_to_parquet(data_dir, results)
+    # The training data just changed: derived artifacts are now stale.
+    for stale in ("token_priors.json", "token_freq.json"):
+        stale_path = os.path.join(data_dir, stale)
+        if os.path.exists(stale_path):
+            os.replace(stale_path, stale_path + ".stale")
+            print(f"Marked stale (training data changed): {stale} -> {stale}.stale")
     print(f"\nData preparation complete. Training data at: {data_dir}/train.parquet")
 
 

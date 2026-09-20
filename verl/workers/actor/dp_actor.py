@@ -1232,16 +1232,20 @@ class DataParallelPPOActor(BasePPOActor):
                                     # (n = frozen corpus token counts). The budget total, the
                                     # base weights, and non-eligible positions are unchanged.
                                     freq_counts = self._vd_freq_table(self_distillation_cfg)
-                                    ext_fd, budget_ratio = redistribute_by_freq(
+                                    ext_fd, budget_ratio, n_fd = redistribute_by_freq(
                                         ext, freq_counts, model_inputs["responses"], valid_pos
                                     )
                                     w_raw = w_raw - ext + ext_fd
+                                    e_total = ext[valid_pos].float().sum().item()
+                                    micro_batch_metrics["self_distillation/lookaway/freq_decay_active"] = 1.0 if e_total > 0 else 0.0
                                     micro_batch_metrics["self_distillation/lookaway/freq_decay_budget_ratio"] = budget_ratio
-                                    n_fd = freq_counts.to(s_dd.device)[model_inputs["responses"].long()]
-                                    micro_batch_metrics["self_distillation/lookaway/freq_decay_lowfreq_share"] = (
-                                        (ext_fd * (n_fd < 1000).to(ext_fd.dtype))[valid_pos].sum()
-                                        / ext[valid_pos].sum().clamp(min=1e-6)
-                                    ).item()
+                                    if e_total > 0:
+                                        micro_batch_metrics["self_distillation/lookaway/freq_decay_lowfreq_share"] = (
+                                            (ext_fd * (n_fd < 1000).to(ext_fd.dtype))[valid_pos].sum()
+                                            / e_total
+                                        ).item()
+                                    else:
+                                        micro_batch_metrics["self_distillation/lookaway/freq_decay_lowfreq_share"] = 0.0
                             # Normalize only tokens that have a real negative view. Tokens from
                             # rows without one retain weight 1, preserving baseline distillation.
                             vd_weights = normalize_vd_weights(w_raw, valid_pos)
