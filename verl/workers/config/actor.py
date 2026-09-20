@@ -124,6 +124,9 @@ class SelfDistillationConfig(BaseConfig):
     vd_prior_file: Optional[str] = None
     vd_jsd_gate: bool = False
     vd_jsd_q: float = 0.5
+    vd_dd_q: float = 0.9
+    vd_dd_jsd: bool = False
+    vd_dd_jsd_q: float = 0.9
     vd_freq_decay: bool = False
     vd_freq_file: Optional[str] = None
     vd_base_signal: str = "dual"
@@ -176,6 +179,12 @@ class SelfDistillationConfig(BaseConfig):
             raise ValueError("vd_freq_decay requires vd_targeted (it reallocates the extrapolation budget).")
         if self.vd_freq_decay and not self.vd_freq_file:
             raise ValueError("vd_freq_decay requires self_distillation.vd_freq_file.")
+        if not 0.0 < self.vd_dd_q < 1.0:
+            raise ValueError(f"vd_dd_q must be in (0, 1), got {self.vd_dd_q}")
+        if self.vd_dd_jsd and not self.vd_targeted:
+            raise ValueError("vd_dd_jsd requires vd_targeted (it is an OR-branch of the dd gate).")
+        if not 0.0 < self.vd_dd_jsd_q < 1.0:
+            raise ValueError(f"vd_dd_jsd_q must be in (0, 1), got {self.vd_dd_jsd_q}")
         if self.vd_base_signal not in ("dual", "dd"):
             raise ValueError(f"vd_base_signal must be 'dual' or 'dd', got {self.vd_base_signal!r}")
         if self.vd_gamma > 0 and not self.teacher_always_on:

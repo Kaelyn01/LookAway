@@ -1104,6 +1104,10 @@ class DataParallelPPOActor(BasePPOActor):
                             }
                             if "teacher_neg_multi_modal_inputs" in model_inputs:
                                 teacher_neg_inputs["multi_modal_inputs"] = model_inputs["teacher_neg_multi_modal_inputs"]
+                            neg_topk_needed = (
+                                bool(self_distillation_cfg.get("vd_dd_jsd", False))
+                                and student_topk_indices is not None
+                            )
                             with torch.no_grad():
                                 teacher_neg_outputs = self._forward_micro_batch(
                                     teacher_neg_inputs,
@@ -1111,9 +1115,13 @@ class DataParallelPPOActor(BasePPOActor):
                                     calculate_entropy=False,
                                     return_all_logps=False,
                                     distill_topk=None,
+                                    topk_indices=student_topk_indices if neg_topk_needed else None,
                                     module=teacher_model,
                                 )
                             teacher_neg_log_prob = teacher_neg_outputs["log_probs"]
+                            teacher_neg_topk_logps = (
+                                teacher_neg_outputs.get("topk_logps") if neg_topk_needed else None
+                            )
 
                             loss_mask_mb = response_mask
                             if self_distillation_mask is not None:
@@ -1165,7 +1173,9 @@ class DataParallelPPOActor(BasePPOActor):
                                 rate_cut = self_distillation_cfg.get("vd_rate_cut", 0.12)
                                 rate_by_id, tmpl_pairs = self._vd_priors(self_distillation_cfg)
                                 if has_valid:
-                                    theta_dd = s_dd.detach()[valid_pos].quantile(0.9)
+                                    theta_dd = s_dd.detach()[valid_pos].quantile(
+                                        float(self_distillation_cfg.get("vd_dd_q", 0.9))
+                                    )
                                 else:
                                     theta_dd = s_dd.new_tensor(0.5)
                                 resp_ids_cpu = model_inputs["responses"].detach().cpu()
@@ -1221,7 +1231,47 @@ class DataParallelPPOActor(BasePPOActor):
                                         (elig & valid_pos).float().sum() / valid_pos.float().sum().clamp(min=1.0)
                                     ).item()
                                     elig = elig & (jsd_tok > jsd_thr)
-                                ext = vd_lambda * (s_dd - theta_dd).clamp(min=0.0) * elig.to(s_dd.dtype)
+                                ext_margin = (s_dd - theta_dd).clamp(min=0.0)
+                                if self_distillation_cfg.get("vd_dd_jsd", False):
+                                    # Distribution-level counterfactual vote: positions where the
+                                    # two teacher DISTRIBUTIONS disagree (per-token JSD above its
+                                    # valid-token quantile) may enter even when the realized-token
+                                    # dd is below the gate; such positions are driven by their
+                                    # saturated-JSD excess (s_jsd > 0.5 exactly when dd_jsd is
+                                    # above its gate, so the margin semantics match the dd leg).
+                                    if teacher_topk_logps is None or teacher_neg_topk_logps is None:
+                                        raise ValueError("vd_dd_jsd requires top-k distillation.")
+                                    with torch.no_grad():
+                                        p_topk = teacher_topk_logps.float()
+                                        n_topk = teacher_neg_topk_logps.float()
+                                        if self_distillation_cfg.distillation_add_tail:
+                                            p_topk = self._add_tail_bucket(p_topk)
+                                            n_topk = self._add_tail_bucket(n_topk)
+                                        else:
+                                            p_topk = p_topk - torch.logsumexp(p_topk, dim=-1, keepdim=True)
+                                            n_topk = n_topk - torch.logsumexp(n_topk, dim=-1, keepdim=True)
+                                        dd_jsd = token_distillation_divergence(
+                                            p_topk, n_topk, float(self_distillation_cfg.get("alpha", 1.0))
+                                        )
+                                    if has_valid:
+                                        theta_jsd = dd_jsd[valid_pos].quantile(
+                                            float(self_distillation_cfg.get("vd_dd_jsd_q", 0.9))
+                                        )
+                                    else:
+                                        theta_jsd = dd_jsd.new_tensor(0.0)
+                                    theta_jsd = theta_jsd.clamp(min=1e-6)
+                                    s_jsd = dd_jsd / (dd_jsd + theta_jsd)
+                                    jsd_admit = (dd_jsd > theta_jsd) & rate_ok & tmpl_ok & valid_pos
+                                    if self_distillation_cfg.get("vd_jsd_gate", False):
+                                        jsd_admit = jsd_admit & (jsd_tok > jsd_thr)
+                                    jsd_margin = (s_jsd - 0.5).clamp(min=0.0) * jsd_admit.to(s_jsd.dtype)
+                                    ext_margin = torch.maximum(ext_margin, jsd_margin)
+                                    elig = elig | jsd_admit
+                                    micro_batch_metrics["self_distillation/lookaway/gate_ddjsd_fraction"] = (
+                                        (jsd_admit & valid_pos).float().sum()
+                                        / valid_pos.float().sum().clamp(min=1.0)
+                                    ).item()
+                                ext = vd_lambda * ext_margin * elig.to(s_dd.dtype)
                                 w_raw = w_raw + ext
                                 micro_batch_metrics["self_distillation/lookaway/ext_fraction"] = (
                                     (elig & valid_pos).float().sum() / valid_pos.float().sum().clamp(min=1.0)

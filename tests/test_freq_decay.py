@@ -153,6 +153,28 @@ class ConfigValidationTests(unittest.TestCase):
         self.assertFalse(cfg.vd_freq_decay)
         self.assertIsNone(cfg.vd_freq_file)
 
+    def test_dd_q_must_be_a_quantile(self):
+        kwargs = self._base_kwargs()
+        for bad in (0.0, 1.0, 1.5):
+            kwargs.update(vd_dd_q=bad)
+            with self.assertRaises(ValueError):
+                SelfDistillationConfig(**kwargs)
+        kwargs.update(vd_dd_q=0.8)
+        self.assertEqual(SelfDistillationConfig(**kwargs).vd_dd_q, 0.8)
+
+    def test_dd_jsd_requires_targeted_and_valid_quantile(self):
+        kwargs = self._base_kwargs()
+        kwargs.update(vd_dd_jsd=True, vd_targeted=False, vd_prior_file=None)
+        with self.assertRaises(ValueError):
+            SelfDistillationConfig(**kwargs)
+        kwargs = self._base_kwargs()
+        kwargs.update(vd_dd_jsd=True, vd_dd_jsd_q=1.0)
+        with self.assertRaises(ValueError):
+            SelfDistillationConfig(**kwargs)
+        kwargs = self._base_kwargs()
+        kwargs.update(vd_dd_jsd=True, vd_dd_jsd_q=0.9)
+        self.assertTrue(SelfDistillationConfig(**kwargs).vd_dd_jsd)
+
 
 class ValidateFreqTableTests(unittest.TestCase):
     """Provenance validation of token_freq.json (see validate_priors.validate_freq)."""
