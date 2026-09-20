@@ -25,7 +25,6 @@ import os
 import tempfile
 
 from transformers import AutoTokenizer
-
 from validate_priors import sha256, tokenizer_fingerprint
 
 DEFAULT_MODEL_PATH = "Qwen/Qwen3.5-4B"
