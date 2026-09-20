@@ -42,7 +42,12 @@ from verl.utils.torch_dtypes import PrecisionType
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outputs_and_unpad, slice_input_tensor, ulysses_pad, ulysses_pad_and_slice_inputs
 from verl.workers.actor import BasePPOActor
-from verl.workers.actor.lookaway_utils import normalize_vd_weights, token_distillation_divergence
+from verl.workers.actor.lookaway_utils import (
+    load_freq_table,
+    normalize_vd_weights,
+    redistribute_by_freq,
+    token_distillation_divergence,
+)
 from verl.workers.config import ActorConfig
 
 __all__ = ["DataParallelPPOActor"]
@@ -859,6 +864,17 @@ class DataParallelPPOActor(BasePPOActor):
         self._vd_priors_cache = (rate_by_id, tmpl_pairs)
         return self._vd_priors_cache
 
+    def _vd_freq_table(self, self_distillation_cfg):
+        """Load and cache the frequency-decay corpus token counts (vocab-indexed)."""
+        cached = getattr(self, "_vd_freq_cache", None)
+        if cached is not None:
+            return cached
+        freq_file = self_distillation_cfg.get("vd_freq_file", None)
+        if not freq_file:
+            raise ValueError("vd_freq_decay requires self_distillation.vd_freq_file.")
+        self._vd_freq_cache = load_freq_table(freq_file)
+        return self._vd_freq_cache
+
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
         self._current_global_steps = data.meta_info.get("global_steps")
@@ -1210,6 +1226,22 @@ class DataParallelPPOActor(BasePPOActor):
                                 micro_batch_metrics["self_distillation/lookaway/ext_fraction"] = (
                                     (elig & valid_pos).float().sum() / valid_pos.float().sum().clamp(min=1.0)
                                 ).item()
+                                if self_distillation_cfg.get("vd_freq_decay", False):
+                                    # Frequency decay: strictly reallocate the extrapolation
+                                    # budget over the normalization scope by a_t = 1/sqrt(n_t+50)
+                                    # (n = frozen corpus token counts). The budget total, the
+                                    # base weights, and non-eligible positions are unchanged.
+                                    freq_counts = self._vd_freq_table(self_distillation_cfg)
+                                    ext_fd, budget_ratio = redistribute_by_freq(
+                                        ext, freq_counts, model_inputs["responses"], valid_pos
+                                    )
+                                    w_raw = w_raw - ext + ext_fd
+                                    micro_batch_metrics["self_distillation/lookaway/freq_decay_budget_ratio"] = budget_ratio
+                                    n_fd = freq_counts.to(s_dd.device)[model_inputs["responses"].long()]
+                                    micro_batch_metrics["self_distillation/lookaway/freq_decay_lowfreq_share"] = (
+                                        (ext_fd * (n_fd < 1000).to(ext_fd.dtype))[valid_pos].sum()
+                                        / ext[valid_pos].sum().clamp(min=1e-6)
+                                    ).item()
                             # Normalize only tokens that have a real negative view. Tokens from
                             # rows without one retain weight 1, preserving baseline distillation.
                             vd_weights = normalize_vd_weights(w_raw, valid_pos)

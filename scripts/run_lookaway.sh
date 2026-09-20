@@ -30,6 +30,7 @@ fi
 MODEL_NAME="$(basename "$MODEL_PATH")"
 TRAIN_FILE="$DATA_DIR/train.parquet"
 PRIOR_FILE="$DATA_DIR/token_priors.json"
+FREQ_FILE="${VD_FREQ_FILE:-$DATA_DIR/token_freq.json}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-LookAway-${MODEL_NAME}}"
 PROJECT_NAME="${PROJECT_NAME:-LookAway}"
 export EXPERIMENT_NAME PROJECT_NAME MODEL_PATH MODEL_REVISION
@@ -49,6 +50,20 @@ done
   --generation-results "$DATA_DIR/results.json" \
   --train-file "$TRAIN_FILE"
 
+# Frequency decay (budget-matched extrapolation reallocation). Enabled by
+# default; disable with VD_FREQ_DECAY=false to train without reallocation.
+FD_OVERRIDES=()
+if [[ "${VD_FREQ_DECAY:-true}" == "true" ]]; then
+  if [ ! -f "$FREQ_FILE" ]; then
+    echo "Missing $FREQ_FILE -- run scripts/build_freq_table.py first (or set VD_FREQ_DECAY=false)." >&2
+    exit 1
+  fi
+  FD_OVERRIDES=(
+    +actor_rollout_ref.actor.self_distillation.vd_freq_decay=true
+    +actor_rollout_ref.actor.self_distillation.vd_freq_file="$FREQ_FILE"
+  )
+fi
+
 exec bash "$SCRIPT_DIR/run_vision_opd.sh" \
   data.train_files="[\"$TRAIN_FILE\"]" \
   trainer.n_gpus_per_node="${TRAINER_N_GPUS_PER_NODE:-4}" \
@@ -64,6 +79,7 @@ exec bash "$SCRIPT_DIR/run_vision_opd.sh" \
   +actor_rollout_ref.actor.self_distillation.vd_prior_file="$PRIOR_FILE" \
   +actor_rollout_ref.actor.self_distillation.vd_jsd_gate=true \
   +actor_rollout_ref.actor.self_distillation.vd_jsd_q=0.5 \
+  ${FD_OVERRIDES[@]+"${FD_OVERRIDES[@]}"} \
   trainer.default_local_dir="$WORK_DIR/checkpoints/$EXPERIMENT_NAME" \
   trainer.rollout_data_dir="$WORK_DIR/rollouts/$EXPERIMENT_NAME" \
   "$@"

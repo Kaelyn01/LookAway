@@ -16,6 +16,7 @@ class LauncherTests(unittest.TestCase):
             data_dir.mkdir()
             (data_dir / "train.parquet").touch()
             (data_dir / "token_priors.json").write_text("{}", encoding="utf-8")
+            (data_dir / "token_freq.json").write_text("{}", encoding="utf-8")
             (data_dir / "results.json").write_text("[]", encoding="utf-8")
 
             fake_bin = tmp_path / "bin"
@@ -42,6 +43,10 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("trainer.group_name=LookAway-Qwen3.5-4B", args)
         self.assertIn("trainer.experiment_name=LookAway-Qwen3.5-4B", args)
         self.assertIn("+actor_rollout_ref.actor.self_distillation.vd_targeted=true", args)
+        self.assertIn("+actor_rollout_ref.actor.self_distillation.vd_freq_decay=true", args)
+        self.assertIn(
+            f"+actor_rollout_ref.actor.self_distillation.vd_freq_file={data_dir / 'token_freq.json'}", args
+        )
 
     def test_non_default_remote_model_requires_revision(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,5 +1,6 @@
 """Small tensor helpers for LookAway token weighting."""
 
+import json
 import math
 
 import torch
@@ -33,3 +34,38 @@ def normalize_vd_weights(raw_weights: torch.Tensor, valid_mask: torch.Tensor) ->
     valid_sum = raw_weights.masked_select(valid_mask).sum().clamp(min=1.0)
     normalized = raw_weights * (valid_count / valid_sum)
     return torch.where(valid_mask, normalized, torch.ones_like(raw_weights))
+
+
+def load_freq_table(freq_file: str) -> torch.Tensor:
+    """Frequency decay: vocab-indexed corpus token counts from the frozen dump.
+
+    The JSON holds {"vocab_size": int, "counts": {token_id: n}} as produced by
+    scripts/build_freq_table.py over the training-side generation dump.
+    """
+    with open(freq_file, encoding="utf-8") as stream:
+        blob = json.load(stream)
+    counts = torch.zeros(int(blob["vocab_size"]), dtype=torch.float32)
+    for key, value in blob["counts"].items():
+        counts[int(key)] = float(value)
+    return counts
+
+
+def redistribute_by_freq(ext: torch.Tensor, freq_counts: torch.Tensor, response_ids: torch.Tensor,
+                         valid_mask: torch.Tensor, kappa: float = 50.0) -> "tuple[torch.Tensor, float]":
+    """Frequency decay: strictly reallocate the extrapolation budget.
+
+    e'_t = E * e_t * a_t / sum_j e_j * a_j with a_t = 1/sqrt(n_t + kappa) over
+    the normalization scope (valid_mask). The budget total E, the base weights,
+    and non-eligible positions are unchanged. kappa defaults to 50 to match the
+    empirical-Bayes pseudo-count used when building the token priors. Returns
+    (ext_new, budget_ratio) where budget_ratio == 1.0 means the total was
+    preserved exactly.
+    """
+    n_freq = freq_counts.to(ext.device)[response_ids.long()]
+    a_fd = torch.rsqrt(n_freq + kappa)
+    e_w = ext * a_fd
+    e_total = ext[valid_mask].sum().clamp(min=1e-6)
+    e_weighted = e_w[valid_mask].sum().clamp(min=1e-6)
+    ext_new = e_w * (e_total / e_weighted)
+    e_ratio = (ext_new[valid_mask].sum() / e_total).item()
+    return ext_new, e_ratio
