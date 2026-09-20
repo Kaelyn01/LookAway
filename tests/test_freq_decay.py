@@ -22,7 +22,15 @@ UTILS = importlib.util.module_from_spec(UTILS_SPEC)
 UTILS_SPEC.loader.exec_module(UTILS)
 
 sys.path.insert(0, str(ROOT))
-from verl.workers.config.actor import SelfDistillationConfig  # noqa: E402
+try:
+    from verl.workers.config.actor import SelfDistillationConfig  # noqa: E402
+
+    HAS_VERL_CONFIG = True
+except ImportError:
+    # The lightweight CI environment installs neither ray nor omegaconf; the
+    # verl package import chain requires them. The config validations run
+    # wherever the full training environment is available (e.g. the H200 box).
+    HAS_VERL_CONFIG = False
 
 
 def make_freq_file(tmpdir, vocab_size, counts):
@@ -87,6 +95,7 @@ class RedistributeByFreqTests(unittest.TestCase):
         self.assertTrue(torch.all(ext_new == 0).item())
 
 
+@unittest.skipUnless(HAS_VERL_CONFIG, "verl runtime dependencies (ray, omegaconf) not installed")
 class ConfigValidationTests(unittest.TestCase):
     def _base_kwargs(self):
         return dict(teacher_always_on=True, teacher_image_key="bbox_images",
