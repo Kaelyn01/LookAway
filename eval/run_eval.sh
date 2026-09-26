@@ -16,7 +16,6 @@ set -euo pipefail
 # =============================================================================
 
 export MKL_SERVICE_FORCE_INTEL=1
-PYTHON="${PYTHON:-python3}"
 
 # --- Required ---
 API_BASE="${API_BASE:?ERROR: API_BASE must be set (e.g. http://localhost:8000/v1/)}"
@@ -24,15 +23,17 @@ OPENAI_MODEL_ID="${OPENAI_MODEL_ID:?ERROR: OPENAI_MODEL_ID must be set}"
 
 # --- Optional ---
 BENCHMARK="${BENCHMARK:-vstar}"
+API_KEY="${OPENAI_API_KEY:-EMPTY}"
 MODEL_NAME="${MODEL_NAME:-${OPENAI_MODEL_ID//\//_}}"
 SEED="${SEED:-42}"
 MAX_TOKENS="${MAX_TOKENS:-32768}"
 OUT_DIR="${OUT_DIR:-model_answer}"
 MAX_RETRIES="${MAX_RETRIES:-3}"
-PARALLEL_WORKERS="${PARALLEL_WORKERS:-32}"
+PARALLEL_WORKERS="${PARALLEL_WORKERS:-256}"
 ENABLE_THINKING="${ENABLE_THINKING:-}"
 
 JUDGE_API_BASE="${JUDGE_API_BASE:-}"
+JUDGE_API_KEY="${JUDGE_API_KEY:-}"
 JUDGE_MODEL="${JUDGE_MODEL:-}"
 JUDGE_MODEL_PATH="${JUDGE_MODEL_PATH:-}"
 JUDGE_MAX_TOKENS="${JUDGE_MAX_TOKENS:-2048}"
@@ -80,7 +81,7 @@ run_single_benchmark() {
 
   # [1/4] Prepare data
   echo "[1/4] Preparing data..."
-  "$PYTHON" prepare_data.py --benchmark "${bench}" --data_dir "${SCRIPT_DIR}"
+  python3 prepare_data.py --benchmark "${bench}" --data_dir "${SCRIPT_DIR}"
 
   # [2/4] Inference
   echo "[2/4] Running inference..."
@@ -91,6 +92,7 @@ run_single_benchmark() {
     --model_name "${model_tag}"
     --seed "${SEED}"
     --api_base "${API_BASE}"
+    --api_key "${API_KEY}"
     --model_id "${OPENAI_MODEL_ID}"
     --max_tokens "${MAX_TOKENS}"
     --max_retries "${MAX_RETRIES}"
@@ -98,12 +100,13 @@ run_single_benchmark() {
   )
   [[ -n "${ENABLE_THINKING}" ]] && INFER_ARGS+=(--enable_thinking "${ENABLE_THINKING}")
 
-  "$PYTHON" infer.py "${INFER_ARGS[@]}"
+  python3 infer.py "${INFER_ARGS[@]}"
 
   # [3/4] Judge
   echo "[3/4] Running judge..."
   local -a JUDGE_ARGS=()
   [[ -n "${JUDGE_API_BASE}" ]] && JUDGE_ARGS+=(--api_base "${JUDGE_API_BASE}")
+  [[ -n "${JUDGE_API_KEY}" ]] && JUDGE_ARGS+=(--api_key "${JUDGE_API_KEY}")
   [[ -n "${JUDGE_MODEL}" ]] && JUDGE_ARGS+=(--judge_model "${JUDGE_MODEL}")
   [[ -n "${JUDGE_MODEL_PATH}" ]] && JUDGE_ARGS+=(--judge_model_path "${JUDGE_MODEL_PATH}")
   [[ -n "${JUDGE_MAX_TOKENS}" ]] && JUDGE_ARGS+=(--judge_max_tokens "${JUDGE_MAX_TOKENS}")
@@ -112,15 +115,14 @@ run_single_benchmark() {
   local judge_model_tag="${model_tag}"
   local judge_json="judge/${bench}/${model_tag}_answer.jsonl"
 
-  "$PYTHON" judge_qwenlm.py \
+  python3 judge_qwenlm.py \
     --benchmark "${judge_benchmark}" \
     --model "${judge_model_tag}" \
-    --answer_dir "${OUT_DIR}" \
     "${JUDGE_ARGS[@]}"
 
   # [4/4] Accuracy
   echo "[4/4] Calculating accuracy..."
-  "$PYTHON" cal_acc.py \
+  python3 cal_acc.py \
     --benchmark "${bench}" \
     --judge_json "${judge_json}" \
     --benchmark_json "${SCRIPT_DIR}/${bench_json}"

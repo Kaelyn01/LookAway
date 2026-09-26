@@ -7,7 +7,7 @@ Usage:
         --model-revision 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
 
 Reads the three-view token dump produced by scripts/prepare_priors.py
-(token_scores_full.jsonl) and counts occurrences of every generated token.
+(teacher_posneg_token_scores.jsonl) and counts occurrences of every generated token.
 Tokens are mapped to ids through an exact vocabulary lookup (no lowercasing,
 no BPE re-merging, no unk fallback: an unknown token string is an error).
 
@@ -16,7 +16,7 @@ dump hash, totals, kappa) so that scripts/validate_priors.py can reject a
 stale table or one built for a different tokenizer. The file is published
 atomically via a temporary file + os.replace.
 
-Output: {data_dir}/token_freq.json  with keys  meta / vocab_size / counts.
+Output: {data_dir}/token_freq_counts.json  with keys  meta / vocab_size / counts.
 """
 
 import argparse
@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    dump_path = os.path.join(args.data_dir, "token_scores_full.jsonl")
+    dump_path = os.path.join(args.data_dir, "teacher_posneg_token_scores.jsonl")
     if not os.path.exists(dump_path):
         raise SystemExit(f"Missing {dump_path} -- run scripts/prepare_priors.py first.")
 
@@ -97,7 +97,7 @@ def main() -> None:
         "vocab_size": len(tokenizer),
         "counts": {str(k): v for k, v in counts.items()},
     }
-    out_path = os.path.join(args.data_dir, "token_freq.json")
+    out_path = os.path.join(args.data_dir, "token_freq_counts.json")
     fd, tmp_path = tempfile.mkstemp(dir=args.data_dir, prefix=".token_freq.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:

@@ -42,7 +42,7 @@ except ImportError:
 
 
 def make_freq_file(tmpdir, vocab_size, counts):
-    path = Path(tmpdir) / "token_freq.json"
+    path = Path(tmpdir) / "token_freq_counts.json"
     path.write_text(json.dumps({"vocab_size": vocab_size, "counts": counts}))
     return path
 
@@ -59,7 +59,7 @@ class LoadFreqTableTests(unittest.TestCase):
 
     def test_missing_file_raises(self):
         with self.assertRaises(FileNotFoundError):
-            UTILS.load_freq_table("/nonexistent/token_freq.json")
+            UTILS.load_freq_table("/nonexistent/token_freq_counts.json")
 
 
 class RedistributeByFreqTests(unittest.TestCase):
@@ -177,7 +177,7 @@ class ConfigValidationTests(unittest.TestCase):
 
 
 class ValidateFreqTableTests(unittest.TestCase):
-    """Provenance validation of token_freq.json (see validate_priors.validate_freq)."""
+    """Provenance validation of token_freq_counts.json (see validate_priors.validate_freq)."""
 
     def _write_table(self, tmpdir, meta_overrides=None, counts=None, vocab_size=10):
         meta = {
@@ -192,7 +192,7 @@ class ValidateFreqTableTests(unittest.TestCase):
             "kappa": 50,
         }
         meta.update(meta_overrides or {})
-        path = Path(tmpdir) / "token_freq.json"
+        path = Path(tmpdir) / "token_freq_counts.json"
         path.write_text(json.dumps({
             "meta": meta, "vocab_size": vocab_size,
             "counts": counts if counts is not None else {"3": 7, "8": 12},
@@ -200,7 +200,7 @@ class ValidateFreqTableTests(unittest.TestCase):
         return path
 
     def _write_dump(self, tmpdir, content="line\n"):
-        path = Path(tmpdir) / "token_scores_full.jsonl"
+        path = Path(tmpdir) / "teacher_posneg_token_scores.jsonl"
         path.write_text(content)
         return path
 

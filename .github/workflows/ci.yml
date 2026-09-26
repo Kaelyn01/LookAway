@@ -23,7 +23,7 @@ jobs:
           python -m pip install numpy pillow opencv-python-headless tqdm huggingface_hub ruff==0.16.8
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
       - name: Lint custom code
-        run: ruff check scripts eval tests verl/workers/actor/lookaway_utils.py
+        run: ruff check scripts tests verl/workers/actor/lookaway_utils.py  # eval/ is vendored upstream (byte-frozen for score provenance)
       - name: Check integration code for undefined names
         run: ruff check --select F verl/workers/actor/dp_actor.py verl/trainer/ppo/ray_trainer.py verl/workers/config/actor.py
       - name: Check shell syntax

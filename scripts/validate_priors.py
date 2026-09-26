@@ -55,7 +55,7 @@ def validate(
         details = ", ".join(
             f"{key}: expected {item['expected']!r}, got {item['actual']!r}" for key, item in mismatches.items()
         )
-        raise ValueError(f"token_priors.json is incompatible ({details}); rerun scripts/prepare_priors.py")
+        raise ValueError(f"token_priors_frozen.json is incompatible ({details}); rerun scripts/prepare_priors.py")
 
 
 def validate_freq(freq_file, model_path, model_revision, tokenizer_sha256, token_dump, expected_kappa=50):
@@ -93,7 +93,7 @@ def validate_freq(freq_file, model_path, model_revision, tokenizer_sha256, token
             )
     if problems:
         details = "; ".join(problems)
-        raise ValueError(f"token_freq.json is incompatible ({details}); rerun scripts/build_freq_table.py")
+        raise ValueError(f"token_freq_counts.json is incompatible ({details}); rerun scripts/build_freq_table.py")
 
 
 def main():
@@ -107,7 +107,7 @@ def main():
     parser.add_argument("--chat-template", required=True)
     parser.add_argument("--generation-results", required=True)
     parser.add_argument("--train-file", required=True)
-    parser.add_argument("--freq-file", default=None, help="token_freq.json to validate (frequency decay)")
+    parser.add_argument("--freq-file", default=None, help="token_freq_counts.json to validate (frequency decay)")
     parser.add_argument("--token-dump", default=None, help="token dump the frequency table was built from")
     args = parser.parse_args()
     if Path(args.model_path).exists():

@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 spec = importlib.util.spec_from_file_location(
-    "teacher_geometry", Path(__file__).resolve().parents[1] / "scripts/prepare_data.py"
+    "teacher_geometry", Path(__file__).resolve().parents[1] / "scripts/build_trainset.py"
 )
 geometry = importlib.util.module_from_spec(spec)
 with mock.patch.dict(sys.modules, {"datasets": types.ModuleType("datasets")}):

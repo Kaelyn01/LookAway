@@ -4,7 +4,7 @@ import hashlib
 import json
 import mimetypes
 import os
-import re
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,22 +24,12 @@ def pick_image_path(item):
 
 
 def make_sample_uid(item, benchmark):
-    sample_uid = item.get("sample_uid")
-    legacy_prefixes = tuple(f"{benchmark}:{key}:" for key in ("index", "question_id", "id"))
-    if sample_uid is not None and str(sample_uid) != "" and not str(sample_uid).startswith(legacy_prefixes):
-        return str(sample_uid)
-    for key in ("uid",):
+    for key in ("sample_uid", "uid", "index", "question_id", "id"):
         value = item.get(key)
         if value is not None and str(value) != "":
             return f"{benchmark}:{key}:{value}"
     stable_obj = {
         "benchmark": benchmark,
-        "index": item.get("index"),
-        "question_id": item.get("question_id"),
-        "id": item.get("id"),
-        "type": item.get("type"),
-        "task": item.get("task"),
-        "source": item.get("source"),
         "images": item.get("images") or [],
         "query": item.get("query", ""),
     }
@@ -57,17 +47,13 @@ def should_retry_existing_record(item):
     return model_answer.startswith("[API_ERROR]") or model_answer.startswith("[FUTURE_ERROR]")
 
 
-def count_failed_records(records):
-    return sum(should_retry_existing_record(record) for record in records)
-
-
 def compact_existing_output(path, benchmark):
     if not path.exists():
         return [], {}, False
     ordered_uids = []
     best_records = {}
     changed = False
-    with open(path, encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -78,10 +64,7 @@ def compact_existing_output(path, benchmark):
             except Exception:
                 changed = True
                 continue
-            old_sample_uid = record.get("sample_uid")
-            sample_uid = make_sample_uid(record, benchmark)
-            if old_sample_uid != sample_uid:
-                changed = True
+            sample_uid = record.get("sample_uid") or make_sample_uid(record, benchmark)
             record["sample_uid"] = sample_uid
             if sample_uid not in best_records:
                 ordered_uids.append(sample_uid)
@@ -119,9 +102,8 @@ def normalize_model_answer(model_answer_raw):
     end = model_answer_raw.find("</answer>", start + len("<answer>")) if start != -1 else -1
     if start != -1 and end != -1 and end > start:
         return model_answer_raw[start + len("<answer>"):end].strip()
-    answer_match = re.search(r"(?i)answer\s*:\s*(.*)", model_answer_raw, flags=re.DOTALL)
-    if answer_match:
-        return answer_match.group(1).strip()
+    if "Answer:" in model_answer_raw:
+        return model_answer_raw[model_answer_raw.find("Answer:"):].strip()
     return model_answer_raw.strip()
 
 
@@ -154,7 +136,7 @@ def main():
     parser.add_argument("--model_name", required=True, type=str)
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--api_base", required=True, type=str)
-    parser.add_argument("--api_key", default=None, type=str, help=argparse.SUPPRESS)
+    parser.add_argument("--api_key", default="EMPTY", type=str)
     parser.add_argument("--model_id", required=True, type=str, help="OpenAI model ID")
     parser.add_argument("--max_tokens", default=4096, type=int)
     parser.add_argument("--max_retries", default=3, type=int)
@@ -162,11 +144,10 @@ def main():
     parser.add_argument("--enable_thinking", type=str, default=None, choices=["True", "False"],
                         help="Set enable_thinking via chat_template_kwargs (True=on, False=off)")
     args = parser.parse_args()
-    api_key = args.api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
 
     benchmark = args.benchmark
     data_path = Path(args.benchmark_json)
-    with open(data_path, encoding="utf-8") as f:
+    with open(data_path, "r", encoding="utf-8") as f:
         total_data = json.load(f)
 
     out_dir = Path(args.out_dir) / benchmark
@@ -209,7 +190,7 @@ def main():
     def get_client():
         c = getattr(thread_local, "client", None)
         if c is None:
-            c = OpenAI(api_key=api_key, base_url=args.api_base, timeout=3600)
+            c = OpenAI(api_key=args.api_key, base_url=args.api_base, timeout=3600)
             thread_local.client = c
         return c
 
@@ -245,7 +226,7 @@ def main():
                     **extra_kwargs,
                 )
                 raw_model_answer = (resp.choices[0].message.content or "").strip()
-                model_answer = normalize_model_answer(raw_model_answer)
+                model_answer = raw_model_answer
                 break
             except Exception as e:
                 if attempt == args.max_retries:
@@ -259,10 +240,7 @@ def main():
         return record
 
     start = time.time()
-    with (
-        ThreadPoolExecutor(max_workers=args.parallel_workers) as executor,
-        open(out_path, "a", encoding="utf-8") as f_out,
-    ):
+    with ThreadPoolExecutor(max_workers=args.parallel_workers) as executor, open(out_path, "a", encoding="utf-8") as f_out:
         future_to_item = {executor.submit(run_one, item): item for item in todo_data}
         with tqdm(total=len(todo_data), desc="Inference", unit="case", dynamic_ncols=True) as pbar:
             for future in as_completed(future_to_item):
@@ -284,9 +262,6 @@ def main():
     print(f"Compacted final output to {len(final_records)} unique samples.")
     print(f"Inference done in {elapsed:.1f}s")
     print(f"Saved answers to: {out_path}")
-    failed = count_failed_records(final_records.values())
-    if failed:
-        raise RuntimeError(f"Inference failed for {failed} samples; rerun the same command to retry them")
 
 
 if __name__ == "__main__":

@@ -58,9 +58,9 @@ class ValidatePriorsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             template = root / "template.jinja"
-            results = root / "results.json"
-            priors = root / "token_priors.json"
-            train_file = root / "train.parquet"
+            results = root / "dataset_generation_manifest.json"
+            priors = root / "token_priors_frozen.json"
+            train_file = root / "trainset_clean.parquet"
             template.write_text("template", encoding="utf-8")
             results.write_text("[]", encoding="utf-8")
             train_file.write_bytes(b"parquet")

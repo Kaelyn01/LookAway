@@ -5,12 +5,12 @@
   <a href="https://github.com/Kaelyn01/LookAway/actions/workflows/ci.yml"><img src="https://github.com/Kaelyn01/LookAway/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-%E2%89%A53.10-3776AB?logo=python&amp;logoColor=white" alt="Python 3.10 or newer"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/Code-Apache--2.0-3DA639" alt="Apache-2.0 license"></a>
-  <a href="https://huggingface.co/datasets/haokaixinmeitiandouhaokaixin/crop-paired-visual-evidence"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Dataset-CROP%20v2.0.0-FFD21E" alt="CROP v2.0.0 dataset"></a>
+  <a href="https://huggingface.co/datasets/Kaelyn01/crop-paired-visual-evidence"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Dataset-CROP%20v2.0.0-FFD21E" alt="CROP v2.0.0 dataset"></a>
 </p>
 
 <p align="center">
   <a href="https://arxiv.org/abs/2605.18740">Vision-OPD Paper</a> ·
-  <a href="https://huggingface.co/datasets/haokaixinmeitiandouhaokaixin/crop-paired-visual-evidence">Aligned Dataset</a> ·
+  <a href="https://huggingface.co/datasets/Kaelyn01/crop-paired-visual-evidence">Aligned Dataset</a> ·
   <a href="#quick-start">Quick Start</a> ·
   <a href="#method">Method</a> ·
   <a href="#evaluation">Evaluation</a>
@@ -27,7 +27,7 @@ LookAway asks a focused question: **which response tokens genuinely depend on se
 
 | Component | Role | Repository entry point |
 | --- | --- | --- |
-| Aligned visual conditions | Full image, official positive crop, and geometry-matched negative crop | `scripts/prepare_data.py` |
+| Aligned visual conditions | Full image, official positive crop, and geometry-matched negative crop | `scripts/build_trainset.py` |
 | Frozen token priors | Word selection rates and template bigrams from a stage-0 dump | `scripts/prepare_priors.py` |
 | Counterfactual voting | Positive-vs-negative view dependence plus a four-gate eligibility funnel | `verl/workers/actor/dp_actor.py` |
 | Training | Reweighted on-policy self-distillation on the vendored Vision-OPD/verl stack | `scripts/run_lookaway.sh` |
@@ -85,8 +85,17 @@ export MODEL_REVISION=851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
 
 ### 2. Prepare aligned data and frozen priors
 
+The repository already ships the frozen training artifacts under `cache/lookaway/`
+(`trainset_clean.parquet`, `dataset_generation_manifest.json`, the frozen priors
+`token_priors_frozen.json`, the frequency table `token_freq_counts.json`, and the
+original three-view teacher scoring `teacher_posneg_token_scores.jsonl`). A fresh
+clone therefore only needs the training images, which are not redistributed here:
+regenerate them from the [CROP release](https://huggingface.co/datasets/Kaelyn01/crop-paired-visual-evidence)
+with `scripts/import_crop_release.py` (see its docstring for the source layout), or
+run the full regeneration pipeline below.
+
 ```bash
-${PYTHON} scripts/prepare_data.py \
+${PYTHON} scripts/build_trainset.py \
   --data-dir "$DATA_DIR" \
   --hf-repo yuanqianhao/Vision-OPD-6K \
   --hf-revision eb5c1c2e7b9a7b6a619efe4161c7369c71bf8af4
@@ -98,7 +107,7 @@ ${PYTHON} scripts/prepare_priors.py \
   --model-revision "$MODEL_REVISION"
 ```
 
-`prepare_data.py` reconstructs and verifies every official positive image before publishing an aligned negative set. `prepare_priors.py` then runs a stage-0 three-view dump and records model, tokenizer, template, generation-result, and Parquet fingerprints. Training rejects stale or mismatched priors.
+`build_trainset.py` reconstructs and verifies every official positive image before publishing an aligned negative set. `prepare_priors.py` then runs a stage-0 three-view dump and records model, tokenizer, template, generation-result, and Parquet fingerprints. Training rejects stale or mismatched priors.
 
 ### 3. Train
 
@@ -116,14 +125,14 @@ Run a two-step smoke test with:
 bash scripts/run_lookaway.sh trainer.total_training_steps=2
 ```
 
-For the unweighted Vision-OPD recipe, use `bash scripts/run_vision_opd.sh`.
+The vendored Vision-OPD training recipe is embedded in `scripts/run_lookaway.sh`; the `vd_*` overrides define the LookAway method (drop them for the unweighted recipe on the same data).
 
 > [!NOTE]
 > On CUDA 12.4 systems, Qwen3.5 / `qwen3_next` may require the Triton gated-delta-rule backend. Add `+actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.gdn_prefill_backend=triton` to the training command, and pass `--additional-config '{"gdn_prefill_backend":"triton"}'` when serving with vLLM.
 
 ## Aligned data
 
-The generated `DATA_DIR/train.parquet` contains `neg_bbox_images`, while `results.json` records the recovered geometry, hashes, and rendering parameters. Data preparation guarantees that:
+The generated `DATA_DIR/trainset_clean.parquet` contains `neg_bbox_images`, while `dataset_generation_manifest.json` records the recovered geometry, hashes, and rendering parameters. Data preparation guarantees that:
 
 - all 6,241 official positive teacher PNGs are reproduced pixel-exactly and preserved;
 - each negative crop inherits the positive crop's canvas, box dimensions, 5-pixel frame, and 2x LANCZOS resize;
@@ -131,7 +140,7 @@ The generated `DATA_DIR/train.parquet` contains `neg_bbox_images`, while `result
 - generation occurs in a staging directory and is published only after the complete dataset passes;
 - successful regeneration invalidates stale Parquet and prior artifacts before rebuilding them.
 
-The public [CROP v2.0.0 dataset](https://huggingface.co/datasets/haokaixinmeitiandouhaokaixin/crop-paired-visual-evidence) is an auditable paired-image release. It is not a drop-in replacement for the local Vision-OPD/LookAway training Parquet produced by `prepare_data.py`. The earlier image release remains available under tag `v1.0.0`.
+The public [CROP v2.0.0 dataset](https://huggingface.co/datasets/Kaelyn01/crop-paired-visual-evidence) is an auditable paired-image release. It is not a drop-in replacement for the local Vision-OPD/LookAway training Parquet produced by `build_trainset.py`. The earlier image release remains available under tag `v1.0.0`.
 
 ## Training options
 
@@ -161,10 +170,10 @@ bash scripts/run_lookaway.sh \
 
 ## Checkpoints and serving
 
-Merge a training checkpoint into Hugging Face format:
+Merge a training checkpoint (FSDP actor shards) into Hugging Face format with the upstream tool:
 
 ```bash
-bash scripts/merge_checkpoint.sh ./cache/lookaway/checkpoints/<experiment>/global_step_65
+python -m verl.model_merger merge --backend fsdp --local_dir <checkpoint>/actor --target_dir <checkpoint>
 ```
 
 Serve the merged checkpoint with vLLM:
@@ -190,7 +199,7 @@ BENCHMARK=vstar,zoombench \
 bash eval/run_eval.sh
 ```
 
-Supported benchmarks include V*Bench, ZoomBench, HR-Bench, MME-RealWorld, VisualProbe, MMVP, CV-Bench, MMStar, and POPE variants. Exact dataset revisions are pinned in `eval/prepare_data.py`. API credentials are read from `OPENAI_API_KEY` and `JUDGE_API_KEY`; failed inference or exhausted judge retries stop accuracy reporting instead of being silently counted as incorrect.
+Supported benchmarks include V*Bench, ZoomBench, HR-Bench, MME-RealWorld, VisualProbe, MMVP, CV-Bench, MMStar, and POPE variants. Exact dataset revisions are pinned in `eval/build_trainset.py`. API credentials are read from `OPENAI_API_KEY` and `JUDGE_API_KEY`; failed inference or exhausted judge retries stop accuracy reporting instead of being silently counted as incorrect.
 
 ## Repository map
 
@@ -239,4 +248,4 @@ GitHub exposes the repository citation from [`CITATION.cff`](CITATION.cff). Look
 
 ## License and provenance
 
-Repository code is licensed under [Apache-2.0](LICENSE). See [NOTICE](NOTICE) for the pinned upstream revisions and provenance details. The image dataset is a derived resource governed by separate upstream image terms; review the [CROP dataset card](https://huggingface.co/datasets/haokaixinmeitiandouhaokaixin/crop-paired-visual-evidence) before redistribution or use.
+Repository code is licensed under [Apache-2.0](LICENSE). See [NOTICE](NOTICE) for the pinned upstream revisions and provenance details. The image dataset is a derived resource governed by separate upstream image terms; review the [CROP dataset card](https://huggingface.co/datasets/Kaelyn01/crop-paired-visual-evidence) before redistribution or use.

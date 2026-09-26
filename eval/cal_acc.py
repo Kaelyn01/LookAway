@@ -5,10 +5,7 @@ from collections import defaultdict
 
 
 def is_correct(item):
-    judgment = str(item.get("judge", "")).strip()
-    if judgment.startswith("[JUDGE_ERROR]"):
-        raise RuntimeError(f"Judge output contains an error: {judgment}")
-    return judgment.lower() == "yes"
+    return str(item.get("judge", "")).strip().lower() == "yes"
 
 
 def acc_text(correct, total):
@@ -17,7 +14,7 @@ def acc_text(correct, total):
 
 
 def calc_vstar(judge_json, benchmark):
-    with open(judge_json, encoding="utf-8") as f:
+    with open(judge_json, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     category_stats = defaultdict(lambda: {"correct": 0, "total": 0})
@@ -40,9 +37,9 @@ def calc_vstar(judge_json, benchmark):
 
 
 def calc_hrbench(judge_json, benchmark, benchmark_json):
-    with open(judge_json, encoding="utf-8") as f:
+    with open(judge_json, "r", encoding="utf-8") as f:
         records = json.load(f)
-    with open(benchmark_json, encoding="utf-8") as f:
+    with open(benchmark_json, "r", encoding="utf-8") as f:
         benchmark_records = json.load(f)
 
     def image_key(item):
@@ -79,9 +76,9 @@ def calc_hrbench(judge_json, benchmark, benchmark_json):
 
 
 def calc_mme_realworld(judge_json, benchmark, benchmark_json):
-    with open(judge_json, encoding="utf-8") as f:
+    with open(judge_json, "r", encoding="utf-8") as f:
         records = json.load(f)
-    with open(benchmark_json, encoding="utf-8") as f:
+    with open(benchmark_json, "r", encoding="utf-8") as f:
         benchmark_records = json.load(f)
 
     def image_key(item):
@@ -141,7 +138,8 @@ def _pope_metrics(items):
     precision = tp / (tp + fp) if (tp + fp) else 0.0
     recall = tp / (tp + fn) if (tp + fn) else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
-    yes_ratio = (tp + fp) / total if total else 0.0
+    yes_count = sum(1 for x in items if str(x.get("response", "")).strip().lower() == "yes")
+    yes_ratio = yes_count / total if total else 0.0
     return accuracy, precision, recall, f1, yes_ratio, total
 
 
@@ -153,7 +151,7 @@ def _pope_fmt(label, accuracy, precision, recall, f1, yes_ratio, total):
 
 
 def calc_pope(judge_json, benchmark):
-    with open(judge_json, encoding="utf-8") as f:
+    with open(judge_json, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     a, p, r, f1, yr, n = _pope_metrics(data)
@@ -161,7 +159,7 @@ def calc_pope(judge_json, benchmark):
 
 
 def calc_cvbench(judge_json, benchmark):
-    with open(judge_json, encoding="utf-8") as f:
+    with open(judge_json, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     type_stats = defaultdict(lambda: {"correct": 0, "total": 0})
@@ -179,7 +177,7 @@ def calc_cvbench(judge_json, benchmark):
 
 
 def calc_visualprobe(judge_json, benchmark):
-    with open(judge_json, encoding="utf-8") as f:
+    with open(judge_json, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     cat_stats = defaultdict(lambda: {"correct": 0, "total": 0})
@@ -201,23 +199,18 @@ def calc_visualprobe(judge_json, benchmark):
 
 
 def calc_generic(judge_json, benchmark):
-    with open(judge_json, encoding="utf-8") as f:
+    with open(judge_json, "r", encoding="utf-8") as f:
         data = json.load(f)
     n = len(data)
     c = sum(1 for x in data if is_correct(x))
-    print(f"{benchmark} Acc: {acc_text(c, n)}")
+    print(f"{benchmark} Acc: {c}/{n} = {100 * c / n:.2f}%")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Calculate accuracy from judge results")
     parser.add_argument("--benchmark", required=True, type=str)
     parser.add_argument("--judge_json", required=True, type=str, help="Path to judge output JSON")
-    parser.add_argument(
-        "--benchmark_json",
-        default=None,
-        type=str,
-        help="Path to original benchmark JSON (for category breakdown)",
-    )
+    parser.add_argument("--benchmark_json", default=None, type=str, help="Path to original benchmark JSON (for category breakdown)")
     args = parser.parse_args()
 
     if args.benchmark == "visualprobe":

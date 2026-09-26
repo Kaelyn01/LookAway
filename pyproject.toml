@@ -25,7 +25,7 @@ dependencies = []
 
 [project.urls]
 Repository = "https://github.com/Kaelyn01/LookAway"
-Dataset = "https://huggingface.co/datasets/haokaixinmeitiandouhaokaixin/crop-paired-visual-evidence"
+Dataset = "https://huggingface.co/datasets/Kaelyn01/crop-paired-visual-evidence"
 Paper = "https://arxiv.org/abs/2605.18740"
 
 # -------------------------------

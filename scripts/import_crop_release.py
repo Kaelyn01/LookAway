@@ -8,10 +8,10 @@ Usage:
         --source-images /path/to/workspace-with-student/teacher_pos/teacher_neg \
         [--quality-labels healthy]
 
-Why this exists: scripts/prepare_data.py regenerates negative views with an
+Why this exists: scripts/build_trainset.py regenerates negative views with an
 unseeded sampler, which would fork the published dataset. This importer
 consumes the published CROP release
-(haokaixinmeitiandouhaokaixin/crop-paired-visual-evidence) directly:
+(Kaelyn01/crop-paired-visual-evidence) directly:
 
 1. loads the release shards and keeps rows whose legacy quality label is in
    --quality-labels (default: healthy only);
@@ -22,9 +22,9 @@ consumes the published CROP release
    negative crops from --source-images/teacher_neg renumbered to the new
    row order; positive and negative SHA-256 are checked against the release
    during the copy;
-4. writes train.jsonl and results.json in the exact format
+4. writes trainset_clean.jsonl and dataset_generation_manifest.json in the exact format
    scripts/prepare_priors.py expects (generation_version 2.0.0 records);
-5. reuses prepare_data.convert_to_parquet to build train.parquet.
+5. reuses build_trainset.convert_to_parquet to build trainset_clean.parquet.
 """
 
 import argparse
@@ -79,7 +79,7 @@ def filter_rows(rows: list[dict], labels: str) -> list[dict]:
 
 
 def make_jsonl_row(row: dict, sample_id: int) -> dict:
-    """train.jsonl row in the upstream Vision-OPD-6K shape prepare_priors reads."""
+    """trainset_clean.jsonl row in the upstream Vision-OPD-6K shape prepare_priors reads."""
     return {
         "problem": "<image>\n" + row["question"],
         "images": [f"images/{sample_id:06d}.png"],
@@ -92,7 +92,7 @@ def make_jsonl_row(row: dict, sample_id: int) -> dict:
 
 
 def make_result_row(row: dict, new_idx: int) -> dict:
-    """results.json record: the v2 generation metadata prepare_priors validates."""
+    """dataset_generation_manifest.json record: the v2 generation metadata prepare_priors validates."""
     return {
         "idx": new_idx,
         "ok": True,
@@ -128,7 +128,7 @@ def main() -> None:
     data_dir = args.data_dir
     os.makedirs(data_dir, exist_ok=True)
 
-    jsonl_path = os.path.join(data_dir, "train.jsonl")
+    jsonl_path = os.path.join(data_dir, "trainset_clean.jsonl")
     n_copied = 0
     with open(jsonl_path, "w", encoding="utf-8") as jsonl:
         results = []
@@ -152,11 +152,14 @@ def main() -> None:
                 row["negative_sha256"], "negative crop",
             )
             n_copied += 3
-    with open(os.path.join(data_dir, "results.json"), "w", encoding="utf-8") as stream:
+    with open(os.path.join(data_dir, "dataset_generation_manifest.json"), "w", encoding="utf-8") as stream:
         json.dump(results, stream)
-    print(f"Kept {len(rows)} rows ({args.quality_labels}); wrote train.jsonl + results.json; copied {n_copied} images.")
+    print(
+        f"Kept {len(rows)} rows ({args.quality_labels}); wrote trainset_clean.jsonl"
+        f" + dataset_generation_manifest.json; copied {n_copied} images."
+    )
 
-    from prepare_data import convert_to_parquet
+    from build_trainset import convert_to_parquet
 
     convert_to_parquet(data_dir, results)
 

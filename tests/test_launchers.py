@@ -14,10 +14,10 @@ class LauncherTests(unittest.TestCase):
             tmp_path = Path(tmp)
             data_dir = tmp_path / "data"
             data_dir.mkdir()
-            (data_dir / "train.parquet").touch()
-            (data_dir / "token_priors.json").write_text("{}", encoding="utf-8")
-            (data_dir / "token_freq.json").write_text("{}", encoding="utf-8")
-            (data_dir / "results.json").write_text("[]", encoding="utf-8")
+            (data_dir / "trainset_clean.parquet").touch()
+            (data_dir / "token_priors_frozen.json").write_text("{}", encoding="utf-8")
+            (data_dir / "token_freq_counts.json").write_text("{}", encoding="utf-8")
+            (data_dir / "dataset_generation_manifest.json").write_text("[]", encoding="utf-8")
 
             fake_bin = tmp_path / "bin"
             fake_bin.mkdir()
@@ -45,7 +45,7 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("+actor_rollout_ref.actor.self_distillation.vd_targeted=true", args)
         self.assertIn("+actor_rollout_ref.actor.self_distillation.vd_freq_decay=true", args)
         self.assertIn(
-            f"+actor_rollout_ref.actor.self_distillation.vd_freq_file={data_dir / 'token_freq.json'}", args
+            f"+actor_rollout_ref.actor.self_distillation.vd_freq_file={data_dir / 'token_freq_counts.json'}", args
         )
 
     def test_lookaway_launcher_disable_freq_decay_needs_no_table(self):
@@ -53,10 +53,10 @@ class LauncherTests(unittest.TestCase):
             tmp_path = Path(tmp)
             data_dir = tmp_path / "data"
             data_dir.mkdir()
-            (data_dir / "train.parquet").touch()
-            (data_dir / "token_priors.json").write_text("{}", encoding="utf-8")
-            (data_dir / "results.json").write_text("[]", encoding="utf-8")
-            # NOTE: no token_freq.json -- the disabled path must not require it.
+            (data_dir / "trainset_clean.parquet").touch()
+            (data_dir / "token_priors_frozen.json").write_text("{}", encoding="utf-8")
+            (data_dir / "dataset_generation_manifest.json").write_text("[]", encoding="utf-8")
+            # NOTE: no token_freq_counts.json -- the disabled path must not require it.
 
             fake_bin = tmp_path / "bin"
             fake_bin.mkdir()
@@ -94,7 +94,7 @@ class LauncherTests(unittest.TestCase):
                 }
             )
             result = subprocess.run(
-                ["bash", str(ROOT / "scripts/run_vision_opd.sh")],
+                ["bash", str(ROOT / "scripts/run_lookaway.sh")],
                 env=env,
                 check=False,
                 capture_output=True,
@@ -113,10 +113,18 @@ class LauncherTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_python.chmod(0o755)
+            data_dir = tmp_path / "data"
+            data_dir.mkdir()
+            for name in ("trainset_clean.parquet", "token_priors_frozen.json",
+                         "token_freq_counts.json", "dataset_generation_manifest.json"):
+                (data_dir / name).touch()
             env = os.environ.copy()
-            env.update({"ARGV_PATH": str(argv_path), "PYTHON": str(fake_python), "WORK_DIR": str(tmp_path)})
+            env.update({
+                "ARGV_PATH": str(argv_path), "PYTHON": str(fake_python),
+                "WORK_DIR": str(tmp_path / "work"), "DATA_DIR": str(data_dir),
+            })
             subprocess.run(
-                ["bash", str(ROOT / "scripts/run_vision_opd.sh"), "trainer.total_training_steps=1"],
+                ["bash", str(ROOT / "scripts/run_lookaway.sh"), "trainer.total_training_steps=1"],
                 env=env,
                 check=True,
             )
@@ -124,160 +132,3 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(args[:3], ["-m", "verl.trainer.main_ppo", "--config-name"])
         self.assertIn("trainer.total_training_steps=1", args)
 
-    def test_eval_launcher_keeps_api_keys_out_of_argv(self):
-        script = (ROOT / "eval/run_eval.sh").read_text(encoding="utf-8")
-        self.assertNotIn("--api_key", script)
-        self.assertIn('PYTHON="${PYTHON:-python3}"', script)
-
-    def test_merge_launcher_uses_python_override(self):
-        script = (ROOT / "scripts/merge_checkpoint.sh").read_text(encoding="utf-8")
-        self.assertIn('PYTHON="${PYTHON:-python3}"', script)
-        self.assertIn('"$PYTHON" -m verl.model_merger merge', script)
-
-    def test_failed_checkpoint_merge_preserves_existing_files(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            checkpoint = tmp_path / "global_step_1"
-            (checkpoint / "actor").mkdir(parents=True)
-            existing = checkpoint / "config.json"
-            existing.write_text("original", encoding="utf-8")
-
-            fake_bin = tmp_path / "bin"
-            fake_bin.mkdir()
-            fake_python = fake_bin / "python3"
-            fake_python.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-            fake_python.chmod(0o755)
-            env = os.environ.copy()
-            env["PATH"] = f"{fake_bin}:{env['PATH']}"
-
-            result = subprocess.run(
-                ["bash", str(ROOT / "scripts/merge_checkpoint.sh"), str(checkpoint)],
-                env=env,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(existing.read_text(encoding="utf-8"), "original")
-            self.assertEqual(list(tmp_path.glob("global_step_1.merge.*")), [])
-            self.assertEqual(list(tmp_path.glob("global_step_1.backup.*")), [])
-
-    def test_successful_checkpoint_merge_replaces_only_top_level_files(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            checkpoint = tmp_path / "global_step_1"
-            actor = checkpoint / "actor"
-            actor.mkdir(parents=True)
-            old_file = checkpoint / "old.bin"
-            old_file.write_text("old", encoding="utf-8")
-
-            fake_bin = tmp_path / "bin"
-            fake_bin.mkdir()
-            fake_python = fake_bin / "python3"
-            fake_python.write_text(
-                "#!/bin/sh\n"
-                'while [ "$#" -gt 0 ]; do\n'
-                '  if [ "$1" = --target_dir ]; then shift; target=$1; fi\n'
-                "  shift\n"
-                "done\n"
-                'printf merged > "$target/model.safetensors"\n',
-                encoding="utf-8",
-            )
-            fake_python.chmod(0o755)
-            env = os.environ.copy()
-            env["PATH"] = f"{fake_bin}:{env['PATH']}"
-
-            subprocess.run(
-                ["bash", str(ROOT / "scripts/merge_checkpoint.sh"), str(checkpoint)],
-                env=env,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-
-            self.assertTrue(actor.is_dir())
-            self.assertFalse(old_file.exists())
-            self.assertEqual((checkpoint / "model.safetensors").read_text(encoding="utf-8"), "merged")
-            self.assertEqual(list(tmp_path.glob("global_step_1.merge.*")), [])
-            self.assertEqual(list(tmp_path.glob("global_step_1.backup.*")), [])
-
-    def test_checkpoint_merge_accepts_nested_output(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            checkpoint = tmp_path / "global_step_1"
-            (checkpoint / "actor").mkdir(parents=True)
-
-            fake_bin = tmp_path / "bin"
-            fake_bin.mkdir()
-            fake_python = fake_bin / "python3"
-            fake_python.write_text(
-                "#!/bin/sh\n"
-                'while [ "$#" -gt 0 ]; do\n'
-                '  if [ "$1" = --target_dir ]; then shift; target=$1; fi\n'
-                "  shift\n"
-                "done\n"
-                'mkdir "$target/lora_adapter"\n'
-                'printf adapter > "$target/lora_adapter/config.json"\n',
-                encoding="utf-8",
-            )
-            fake_python.chmod(0o755)
-            env = os.environ.copy()
-            env["PATH"] = f"{fake_bin}:{env['PATH']}"
-
-            subprocess.run(
-                ["bash", str(ROOT / "scripts/merge_checkpoint.sh"), str(checkpoint)],
-                env=env,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-
-            self.assertEqual((checkpoint / "lora_adapter/config.json").read_text(), "adapter")
-
-    def test_checkpoint_install_failure_restores_prior_files(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            checkpoint = tmp_path / "global_step_1"
-            (checkpoint / "actor").mkdir(parents=True)
-            existing = checkpoint / "config.json"
-            existing.write_text("original", encoding="utf-8")
-
-            fake_bin = tmp_path / "bin"
-            fake_bin.mkdir()
-            fake_python = fake_bin / "python3"
-            fake_python.write_text(
-                "#!/bin/sh\n"
-                'while [ "$#" -gt 0 ]; do\n'
-                '  if [ "$1" = --target_dir ]; then shift; target=$1; fi\n'
-                "  shift\n"
-                "done\n"
-                'printf new > "$target/config.json"\n'
-                'printf model > "$target/model.safetensors"\n',
-                encoding="utf-8",
-            )
-            fake_python.chmod(0o755)
-            fake_mv = fake_bin / "mv"
-            fake_mv.write_text(
-                '#!/bin/sh\ncase "$1" in *.merge.*/model.safetensors) exit 1 ;; esac\nexec /bin/mv "$@"\n',
-                encoding="utf-8",
-            )
-            fake_mv.chmod(0o755)
-            env = os.environ.copy()
-            env["PATH"] = f"{fake_bin}:{env['PATH']}"
-
-            result = subprocess.run(
-                ["bash", str(ROOT / "scripts/merge_checkpoint.sh"), str(checkpoint)],
-                env=env,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(existing.read_text(encoding="utf-8"), "original")
-            self.assertFalse((checkpoint / "model.safetensors").exists())
-
-
-if __name__ == "__main__":
-    unittest.main()

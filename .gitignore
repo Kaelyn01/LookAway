@@ -1,5 +1,9 @@
 # caches and generated data (see scripts/prepare_*.py)
-cache/
+cache/*
+!cache/lookaway/
+cache/lookaway/checkpoints/
+cache/lookaway/rollouts/*
+!cache/lookaway/rollouts/lookaway-sample-level-60steps/
 data/
 dumps/
 results.json
@@ -43,3 +47,13 @@ dist/
 .DS_Store
 deliverables/
 *.bak*
+exp/
+
+# tracked frozen training artifacts (override the blanket rules above)
+!cache/lookaway/trainset_clean.parquet
+!cache/lookaway/rollouts/lookaway-sample-level-60steps/
+!cache/lookaway/rollouts/lookaway-sample-level-60steps/**
+!cache/lookaway/rollouts/
+cache/lookaway/images/
+cache/lookaway/teacher_images/
+cache/lookaway/teacher_neg/

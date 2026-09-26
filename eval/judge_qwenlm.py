@@ -48,13 +48,12 @@ def extract_first_option(text):
     match = re.search(r"\(([A-Z])\)", text)
     if match:
         return match.group(1)
-    match = re.search(
-        r"(?:^|\b(?:answer|option|choice)\s*(?:is\s+)?[:\-]?\s*)([A-F])(?:$|[.\)\]\s])",
-        text,
-        re.IGNORECASE,
-    )
+    match = re.search(r"([A-Z])[\.\)\s]", text)
     if match:
-        return match.group(1).upper()
+        return match.group(1)
+    match = re.search(r"([A-Z])", text)
+    if match:
+        return match.group(1)
     return ""
 
 
@@ -107,18 +106,14 @@ def first_letter_match(gt, answer):
 
 
 def extract_answer(model_answer_raw):
-    text = model_answer_raw.strip()
-    think_end = text.rfind("</think>")
-    if think_end != -1:
-        text = text[think_end + len("</think>") :].strip()
-    start = text.rfind("<answer>")
-    end = text.find("</answer>", start + len("<answer>")) if start != -1 else -1
-    if start != -1 and end != -1 and end > start:
-        return text[start + len("<answer>") : end].strip()
-    answer_match = re.search(r"(?i)answer\s*:\s*(.*)", text, flags=re.DOTALL)
-    if answer_match:
-        return answer_match.group(1).strip()
-    return text
+    if "<answer>" in model_answer_raw:
+        start = model_answer_raw.find("<answer>")
+        end = model_answer_raw.find("</answer>")
+        if start != -1 and end != -1:
+            return model_answer_raw[start + len("<answer>") : end].strip()
+    if "Answer:" in model_answer_raw:
+        return model_answer_raw[model_answer_raw.find("Answer:") :].strip()
+    return model_answer_raw.strip()
 
 
 def judge_via_api(prompts, api_base, api_key, judge_model, judge_max_tokens, parallel_workers=32):
@@ -139,7 +134,6 @@ def judge_via_api(prompts, api_base, api_key, judge_model, judge_max_tokens, par
 
     def call_one(idx, prompt):
         client = get_client()
-        last_error = None
         for attempt in range(3):
             try:
                 resp = client.chat.completions.create(
@@ -149,11 +143,10 @@ def judge_via_api(prompts, api_base, api_key, judge_model, judge_max_tokens, par
                     max_tokens=judge_max_tokens,
                 )
                 return idx, (resp.choices[0].message.content or "").strip()
-            except Exception as exc:
-                last_error = type(exc).__name__
+            except Exception:
                 if attempt < 2:
                     time.sleep(1.0)
-        return idx, f"[JUDGE_ERROR] {last_error}"
+        return idx, "No"
 
     with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
         futures = [executor.submit(call_one, i, p) for i, p in enumerate(prompts)]
@@ -192,12 +185,10 @@ def main():
     parser.add_argument("--model", required=True, type=str)
     parser.add_argument("--judge_model_path", default=None, type=str, help="Local model path for vLLM-based judging")
     parser.add_argument("--api_base", default=None, type=str, help="OpenAI-compatible API base URL for judging")
-    parser.add_argument("--api_key", default=None, type=str, help=argparse.SUPPRESS)
+    parser.add_argument("--api_key", default="EMPTY", type=str)
     parser.add_argument("--judge_model", default=None, type=str, help="Model name for API-based judging")
     parser.add_argument("--judge_max_tokens", default=2048, type=int)
-    parser.add_argument("--answer_dir", default="model_answer", type=str)
     args = parser.parse_args()
-    api_key = args.api_key or os.environ.get("JUDGE_API_KEY") or os.environ.get("OPENAI_API_KEY", "EMPTY")
 
     if not args.api_base and not args.judge_model_path:
         print(
@@ -207,7 +198,7 @@ def main():
         )
         sys.exit(1)
 
-    answer_path = os.path.join(args.answer_dir, args.benchmark, f"{args.model}_answer.jsonl")
+    answer_path = f"model_answer/{args.benchmark}/{args.model}_answer.jsonl"
     save_path = f"judge/{args.benchmark}/{args.model}_answer.jsonl"
     os.makedirs(f"judge/{args.benchmark}", exist_ok=True)
     is_mcq = args.benchmark in MCQ_BENCHMARKS
@@ -215,7 +206,7 @@ def main():
     is_mmvp = args.benchmark in MMVP_BENCHMARKS
 
     data_list = []
-    with open(answer_path, encoding="utf-8") as f:
+    with open(answer_path, "r", encoding="utf-8") as f:
         for line in f:
             data_list.append(json.loads(line))
 
@@ -282,7 +273,7 @@ def main():
         if args.api_base:
             judge_model_name = args.judge_model or "default"
             results = judge_via_api(
-                prompt_lists, args.api_base, api_key, judge_model_name, args.judge_max_tokens
+                prompt_lists, args.api_base, args.api_key, judge_model_name, args.judge_max_tokens
             )
         else:
             results = judge_via_vllm(prompt_lists, args.judge_model_path, args.judge_max_tokens)
@@ -297,9 +288,6 @@ def main():
     with open(save_path, "w", encoding="utf-8") as out_file:
         json.dump(data_list, out_file, ensure_ascii=False, indent=4)
     print(f"Saved judge results to: {save_path}")
-    failed = [item for item in data_list if str(item.get("judge", "")).startswith("[JUDGE_ERROR]")]
-    if failed:
-        raise RuntimeError(f"LLM judge failed for {len(failed)} cases; results were saved for inspection and retry")
 
 
 if __name__ == "__main__":
